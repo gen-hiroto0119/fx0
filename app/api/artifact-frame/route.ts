@@ -1,5 +1,6 @@
 import { ARTIFACT_IMAGE_PATH, artifactImageSrc } from '../../../lib/artifact-image'
 import { DESIGN_ARTIFACT_EMBEDDED_CSP, designFrameCsp, designFrameHtml, prepareDesignArtifactHtml, remoteImagesEnabled } from '../../../lib/design-artifact'
+import { DESIGN_CAPTURE_RELAY, designCaptureScript } from '../../../lib/design-capture'
 import { markRemoteImages } from '../../../lib/remote-image'
 import { readDesignArtifactAt } from '../../../lib/journal'
 import { readGeneration } from '../../../lib/history'
@@ -32,7 +33,10 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
     ? markRemoteImages(artifact, crypto.randomUUID().replaceAll('-', ''), { remote: remoteImagesEnabled() })
     : { html: artifact, images: [] }
   const images = marked.images.map(({ marker, url }) => ({ marker, src: artifactImageSrc(sessionId, url) }))
-  const prepared = marked.html == null ? null : prepareDesignArtifactHtml(marked.html, DESIGN_ARTIFACT_EMBEDDED_CSP, readyToken)
+  // Every preview can be photographed where it is (lib/design-capture.ts), on screen or as
+  // the hidden copy screenshot_design loads when no preview shows the revision.
+  const prepared = marked.html == null ? null : prepareDesignArtifactHtml(marked.html, DESIGN_ARTIFACT_EMBEDDED_CSP, readyToken,
+    designCaptureScript(readyToken))
   // Every stored design passed validation, so this only guards against one that
   // somehow lacks a doctype: it is never shown without its CSP.
   if (artifact != null && prepared == null) log(sessionId, 'artifact:unrenderable', { revision: past ? revision : live!.revision })
@@ -41,7 +45,7 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
       artifact != null ? 'This design could not be prepared for preview.'
         : past ? 'This version is not in the history.' : 'No design artifact has been published for this session.'
     }</p></body></html>`
-  const html = designFrameHtml(preparedArtifact, readyToken, images)
+  const html = designFrameHtml(preparedArtifact, readyToken, images, DESIGN_CAPTURE_RELAY)
   return new Response(html, {
     status: artifact == null ? 404 : 200,
     headers: {

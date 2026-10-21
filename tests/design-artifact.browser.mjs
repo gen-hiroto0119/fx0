@@ -10,6 +10,7 @@ import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { markRemoteImages } from '../lib/remote-image.ts'
 import { DESIGN_ARTIFACT_EMBEDDED_CSP, DESIGN_FRAME_CSP, designFrameCsp, designFrameHtml, MAX_EMBEDDED_IMAGE_BYTES, prepareDesignArtifactHtml, validateDesignArtifactHtml } from '../lib/design-artifact.ts'
+import { DESIGN_CAPTURE_RELAY, designCaptureScript } from '../lib/design-capture.ts'
 
 // Opt-in: runs real Chrome headless on this machine. Set CHROME_PATH for another browser binary.
 const CHROME = process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
@@ -183,6 +184,86 @@ for (const name of ['small', 'large', 'repeat']) open(name)
     assert.equal(hits.pixel, 1, 'the next revision embeds the image from the browser cache')
     assert.equal(out.large?.embedded, 4, 'a design past what a data: URL can carry still renders')
     assert.equal(out.repeat?.embedded, Math.floor(MAX_EMBEDDED_IMAGE_BYTES / repeated.length), 'the budget counts every place an image is written')
+  } finally {
+    server.closeAllConnections()
+    server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// screenshot_design: the app mounts a preview the way DesignCapture does
+// (fixed, invisible, under the page, in a phone-sized window) and asks it for photos once
+// it has painted: the viewport, then the whole page. The viewport must come back as one
+// 1280x800 WebP of the design, the page as viewport-high tiles from the top (even when
+// html and body are only viewport-high and the content overflows them), and the remote
+// url() the design names must never reach the network, capture included.
+test('in Chrome, a hidden preview photographs its viewport and its whole page without any network', async () => {
+  assert.ok(existsSync(CHROME), `Chrome not found at ${CHROME}; set CHROME_PATH`)
+  const requests = []
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://test')
+    requests.push(url.pathname)
+    if (url.pathname === '/frame') {
+      const stored = validateDesignArtifactHtml(`<!doctype html><html><head><style>html,body{margin:0;height:100%}
+section{height:800px}.a{background:#ff0066}.b{background:#00cc66}.c{height:400px;background:#3366ff}
+.leak{background:url(http://127.0.0.1:${server.address().port}/leak.png)}</style></head><body>
+<section class="a"><h1 class="leak" style="color:#fff;margin:0;padding:40px">fx0</h1></section><section class="b"></section><section class="c"></section></body></html>`)
+      assert.equal(stored.ok, true, stored.error)
+      const token = 'browser-test'
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': DESIGN_FRAME_CSP })
+      response.end(designFrameHtml(prepareDesignArtifactHtml(stored.html, DESIGN_ARTIFACT_EMBEDDED_CSP, token, designCaptureScript(token)), token, [], DESIGN_CAPTURE_RELAY))
+    } else if (url.pathname === '/hold') {
+      setTimeout(() => response.writeHead(404).end(), 6000)
+    } else if (url.pathname === '/') {
+      response.writeHead(200, { 'content-type': 'text/html' }).end(`<!doctype html><html><head><title>app</title></head><body style="margin:0">
+<main style="position:fixed;inset:0;background:#fff"><pre id="out">{}</pre></main>
+<div style="position:fixed;inset:0;z-index:-10;overflow:hidden;opacity:0;pointer-events:none"><iframe id="capture" src="/frame" style="width:1280px;height:800px;border:0"></iframe></div>
+<script>
+const frame = document.getElementById('capture')
+const out = {}
+const show = () => { document.getElementById('out').textContent = JSON.stringify(out) }
+const describe = async (blob) => {
+  const bitmap = await createImageBitmap(blob)
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height)
+  const context = canvas.getContext('2d')
+  context.drawImage(bitmap, 0, 0)
+  return { type: blob.type, width: bitmap.width, height: bitmap.height, color: [...context.getImageData(1200, bitmap.height - 20, 1, 1).data.slice(0, 3)] }
+}
+addEventListener('message', async ({ data, source }) => {
+  if (source !== frame.contentWindow) return
+  if (data?.type === 'fx0-artifact-painted' && !out.asked) {
+    out.asked = true
+    frame.contentWindow.postMessage({ type: 'fx0-capture', cid: 'viewport' }, location.origin)
+  }
+  if (data?.type !== 'fx0-artifact-captured') return
+  out[data.cid] = { height: data.height, truncated: data.truncated, timing: data.timing, images: await Promise.all(data.blobs.map(describe)) }
+  if (data.cid === 'viewport') frame.contentWindow.postMessage({ type: 'fx0-capture', cid: 'page', full: true }, location.origin)
+  show()
+})
+</script><img alt="" src="/hold"></body></html>`)
+    } else {
+      response.writeHead(404).end()
+    }
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const dir = await mkdtemp(join(tmpdir(), 'fx0-design-capture-'))
+  try {
+    const { stdout } = await promisify(execFile)(CHROME, [
+      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--window-size=390,844',
+      `--user-data-dir=${join(dir, 'profile')}`, '--dump-dom', `http://127.0.0.1:${server.address().port}/`,
+    ], { timeout: 60_000, maxBuffer: 16 * 1024 * 1024 })
+    const out = JSON.parse(stdout.match(/<pre id="out">([^<]*)<\/pre>/)[1])
+    const near = (rgb, target) => rgb.every((value, i) => Math.abs(value - target[i]) < 24)
+    assert.equal(out.viewport.images.length, 1)
+    assert.deepEqual(out.viewport.images.map(({ type, width, height }) => [type, width, height]), [['image/webp', 1280, 800]], 'Chrome sends WebP')
+    assert.ok(near(out.viewport.images[0].color, [255, 0, 102]), `the viewport is the design's first section, got ${out.viewport.images[0].color}`)
+    for (const part of ['fontsMs', 'libraryMs', 'encodeMs']) assert.ok(out.viewport.timing?.[part] >= 0, `the frame reports ${part}`)
+    assert.equal(out.page.height, 2000)
+    assert.equal(out.page.truncated, false)
+    assert.deepEqual(out.page.images.map(({ width, height }) => [width, height]), [[1280, 800], [1280, 800], [1280, 400]])
+    const colors = [[255, 0, 102], [0, 204, 102], [51, 102, 255]]
+    out.page.images.forEach((image, i) => assert.ok(near(image.color, colors[i]), `tile ${i + 1} shows section ${i + 1}, got ${image.color}`))
+    assert.ok(!requests.includes('/leak.png'), 'the url() the design names never reached the network')
   } finally {
     server.closeAllConnections()
     server.close()

@@ -74,8 +74,9 @@ export const MAX_EMBEDDED_IMAGE_BYTES = 4 * 1024 * 1024
 // and relays its heartbeat, paint and link messages to the app. Each image marker in the
 // design becomes its image, loaded from `src` (cached by the browser across revisions),
 // within MAX_EMBEDDED_IMAGE_BYTES counted per occurrence; a missing image is blank. Only
-// then does the design start, so it never needs the network.
-export function designFrameHtml(preparedArtifact: string, readyToken: string, images: { marker: string; src: string }[] = []): string {
+// then does the design start, so it never needs the network. `relay` is more wrapper
+// script (lib/design-capture.ts), run before the design loads.
+export function designFrameHtml(preparedArtifact: string, readyToken: string, images: { marker: string; src: string }[] = [], relay = ''): string {
   // The design reaches its frame as a blob: URL the wrapper makes from this string,
   // not as a data: URL: browsers refuse data: URLs past 2 MiB, which embedded images
   // reach. A blob: document is local like data:, so it inherits this wrapper's CSP and
@@ -109,6 +110,8 @@ frame.setAttribute('credentialless','');
 let readySignals=0;
 let consumedSignals=0;
 let lastHeartbeat=Date.now();
+// A relay can hold off restores while the design is busy on its behalf (lib/design-capture.ts).
+let holdUntil=0;
 const restore=()=>{if(!artifact)return;lastHeartbeat=Date.now();frame.src=artifact;};
 addEventListener('message',event=>{
   if(event.source!==frame.contentWindow||event.data?.token!==token)return;
@@ -135,9 +138,9 @@ setInterval(()=>{
   const now=Date.now(),paused=now-lastCheck>3000;
   lastCheck=now;
   if(document.visibilityState!=='visible'||paused){lastHeartbeat=now;return;}
-  if(now-lastHeartbeat>3000)restore();
+  if(now-lastHeartbeat>3000&&now>holdUntil)restore();
 },500);
-const read=blob=>new Promise(done=>{const reader=new FileReader();reader.onload=()=>done(String(reader.result));reader.onerror=()=>done(null);reader.readAsDataURL(blob)});
+${relay}const read=blob=>new Promise(done=>{const reader=new FileReader();reader.onload=()=>done(String(reader.result));reader.onerror=()=>done(null);reader.readAsDataURL(blob)});
 const load=async src=>{try{const response=await fetch(src,{credentials:'same-origin'});if(!response.ok)return null;const blob=await response.blob();return /^image\\/(png|jpeg|gif|webp|avif)$/.test(blob.type)?await read(blob):null}catch{return null}};
 Promise.all(images.map(image=>load(image.src))).then(loaded=>{
   let html=design,total=0;
@@ -182,13 +185,14 @@ export function normalizeDesignArtifactHtml(html: string): string {
 // The CSP and bootstrap go right after the doctype, so they are the first things
 // the parser puts in <head>. A design stored before normalization renders the same
 // way; one without a doctype is not rendered at all (null), never without its CSP.
-export function prepareDesignArtifactHtml(html: string, embeddedCsp?: string, readyToken?: string): string | null {
+// `scripts` follow the bootstrap, under the same CSP (lib/design-capture.ts).
+export function prepareDesignArtifactHtml(html: string, embeddedCsp?: string, readyToken?: string, scripts = ''): string | null {
   const document = normalizeDesignArtifactHtml(html)
   if (!document.startsWith(DOCTYPE)) return null
   const csp = embeddedCsp
     ? `<meta http-equiv="Content-Security-Policy" content="${escapeAttribute(embeddedCsp)}">`
     : ''
-  return DOCTYPE + csp + designArtifactBootstrap(readyToken) + document.slice(DOCTYPE.length)
+  return DOCTYPE + csp + designArtifactBootstrap(readyToken) + scripts + document.slice(DOCTYPE.length)
 }
 
 // The start of a document, with invisible characters spelled out, so a rejected

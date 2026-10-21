@@ -69,6 +69,7 @@ function toolHost() {
     storeResult: () => {},
     readResult: () => undefined,
     askUser: async () => ({}),
+    captureDesign: async () => ({ images: [{ mimeType: 'image/jpeg', data: 'AAAA' }], revision: 1 }),
     log: () => {},
     spawnSubagent: async () => 'done',
     capabilitySearch: () => [],
@@ -113,6 +114,7 @@ test('design mode exposes only design and common host tools', async () => {
       'read_design',
       'publish_design',
       'edit_design',
+      'screenshot_design',
       'web_fetch',
       'ask_user_question',
       'read_tool_result',
@@ -126,6 +128,23 @@ test('design mode exposes only design and common host tools', async () => {
     { edits: [{ old_string: 'black', new_string: 'blue' }, { old_string: 'Old', new_string: 'New' }] },
     { signal },
   )
+})
+
+test('screenshot_design gives the model its images with what they show, or why there are none', async () => {
+  const signal = new AbortController().signal
+  const calls = []
+  const host = { ...toolHost(), captureDesign: async (_signal, options) => {
+    calls.push(options)
+    return { images: [{ mimeType: 'image/webp', data: 'AAAA' }, { mimeType: 'image/webp', data: 'BBBB' }], width: 1280, height: 2400, truncated: true, revision: 3 }
+  } }
+  const screenshot = createTools(host).find((tool) => tool.name === 'screenshot_design')
+  const page = await screenshot.execute({ full_page: true }, { signal, executionId: 'call_9' })
+  assert.deepEqual(calls, [{ toolCallId: 'call_9', full: true }])
+  assert.deepEqual(page.images, [{ type: 'image', mimeType: 'image/webp', data: 'AAAA' }, { type: 'image', mimeType: 'image/webp', data: 'BBBB' }])
+  assert.equal(page.text, 'Full-page screenshot of design revision 3, 1280x2400 CSS px, in 2 viewport-high images, top to bottom. The page continues below the last image.')
+  const failing = createTools({ ...toolHost(), captureDesign: async () => { throw new Error('no fx0 tab is open and in front to take it') } })
+  assert.deepEqual(await failing.find((tool) => tool.name === 'screenshot_design').execute({}, { signal, executionId: 'call_10' }),
+    { error: 'screenshot unavailable: no fx0 tab is open and in front to take it' })
 })
 
 test('turn events update an existing sidebar session without mutating it', () => {

@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { designLinkUrl } from '../lib/design-link'
 import { EMPTY_DRAFT_DOCUMENT, patchDraftDocument } from '../lib/draft-preview'
+import { CAPTURE_PAINT_MS, CAPTURE_PREVIEW_START_MS } from '../lib/capture-protocol'
+import { captureFrame, reportCaptureFailure, sendCapture, type CaptureRequest } from './design-capture'
 import DesignLinkDialog from './design-link-dialog'
 import { HowItWorksPanel } from './how-it-works'
 
@@ -18,6 +20,8 @@ export default function PreviewPane({
   draft = null,
   intro,
   onClose,
+  capture = null,
+  onCaptureDone,
 }: {
   source: PreviewSource
   // A past revision opened from the transcript's "View" link, never the latest; null is the latest.
@@ -27,6 +31,10 @@ export default function PreviewPane({
   // Only an empty chat explains fx0; a chat waiting on its first design stays blank.
   intro: boolean
   onClose: () => void
+  // A screenshot_design request; the preview answers from the frame on screen.
+  capture?: CaptureRequest | null
+  // Whether this preview answered (a photo or a failure); when not, the hidden copy should.
+  onCaptureDone?: (cid: string, answered: boolean) => void
 }) {
   const session = encodeURIComponent(source.sessionId)
   const previewUrl = source.revision > 0
@@ -109,6 +117,57 @@ export default function PreviewPane({
       if (fallback.current) clearTimeout(fallback.current)
     }
   }, [])
+  // screenshot_design photographs the design on screen in place: no reload, and the photo is
+  // what the user sees. A past revision on screen or a frame with no size (behind the chat on
+  // a phone) hands the request to the hidden copy at once (onCaptureDone(cid, false)), and so
+  // does a revision that has not started loading here after CAPTURE_PREVIEW_START_MS. A slot
+  // loading the asked revision is waited for, up to CAPTURE_PAINT_MS: the hidden copy would
+  // load the same document from scratch. Once the frame is asked, its answer is final.
+  const captureDone = useRef(onCaptureDone)
+  captureDone.current = onCaptureDone
+  const waitingCapture = useRef<{ request: CaptureRequest; timer: ReturnType<typeof setTimeout>; loading: boolean } | null>(null)
+  const settleCapture = (request: CaptureRequest): boolean => {
+    if (waitingCapture.current?.request !== request) return false
+    clearTimeout(waitingCapture.current.timer)
+    waitingCapture.current = null
+    return true
+  }
+  const handOffCapture = (request: CaptureRequest) => {
+    if (settleCapture(request)) captureDone.current?.(request.cid, false)
+  }
+  const failCapture = (request: CaptureRequest) => {
+    if (settleCapture(request)) void reportCaptureFailure(request, 'not-painted').finally(() => captureDone.current?.(request.cid, true))
+  }
+  useEffect(() => {
+    if (!capture) return
+    const request = capture
+    waitingCapture.current = { request, timer: setTimeout(() => handOffCapture(request), CAPTURE_PREVIEW_START_MS), loading: false }
+    return () => handOffCapture(request)
+  }, [capture?.cid]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const waiting = waitingCapture.current
+    if (!waiting) return
+    const { request } = waiting
+    if (viewing != null) return handOffCapture(request)
+    if (!previewUrl?.endsWith(`&v=${request.revision}`)) return
+    const index = slots.indexOf(previewUrl)
+    const frame = index < 0 ? null : frames.current[index]
+    if (!frame) return
+    if (frame.getBoundingClientRect().width < 1) return handOffCapture(request)
+    if (front !== index || !frame.contentWindow) {
+      if (!waiting.loading) {
+        clearTimeout(waiting.timer)
+        waiting.loading = true
+        waiting.timer = setTimeout(() => failCapture(request), CAPTURE_PAINT_MS)
+      }
+      return
+    }
+    settleCapture(request)
+    const askedAt = Date.now()
+    void captureFrame(frame.contentWindow, request.cid, request.full)
+      .then((reply) => sendCapture(request, reply, { path: 'preview', askedAt }))
+      .finally(() => captureDone.current?.(request.cid, true))
+  }, [capture?.cid, front, slots, previewUrl, viewing]) // eslint-disable-line react-hooks/exhaustive-deps
   const caughtUp = !previewUrl || (front != null && slots[front] === previewUrl)
   const [heldDraft, setHeldDraft] = useState<string | null>(null)
   const liveDraft = draft && renderable(draft) ? draft : null
