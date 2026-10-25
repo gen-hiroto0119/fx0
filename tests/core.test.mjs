@@ -745,7 +745,7 @@ test('a design that does not start with its doctype is rejected with what it sta
 })
 
 // Run the served wrapper itself with a controlled clock and browser scheduling.
-async function frameWatchdog() {
+async function frameWatchdog(relay = '') {
   let now = 0
   let check
   let loads = 0
@@ -763,7 +763,7 @@ async function frameWatchdog() {
     querySelector: () => ({ append() {} }),
     addEventListener: (type, listener) => documentListeners.set(type, listener),
   }
-  const html = designFrameHtml(SAFE_DESIGN, 'watchdog-test')
+  const html = designFrameHtml(SAFE_DESIGN, 'watchdog-test', [], relay)
   runInNewContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], {
     document,
     Date: { now: () => now },
@@ -814,6 +814,14 @@ test('the preview watchdog tolerates suspended timers before the visibility even
   frame.tick()
   frame.heartbeat()
   assert.equal(frame.loads, 1)
+})
+
+test('the preview watchdog holds a silent design during capture, then resumes recovery', async () => {
+  const frame = await frameWatchdog('holdUntil=5000;')
+  for (let i = 0; i < 10; i++) frame.tick()
+  assert.equal(frame.loads, 1, 'capturing must not reload the document being photographed')
+  frame.tick()
+  assert.equal(frame.loads, 2, 'a silent design is recoverable again once the capture hold expires')
 })
 
 test('the preview watchdog still restores a design that stays silent while visible', async () => {
