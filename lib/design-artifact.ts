@@ -115,6 +115,7 @@ let current=null;
 let pending=null;
 let hotReady=false;
 let hasPainted=false;
+let hasLoaded=false;
 const frame=document.createElement('iframe');
 frame.title='Interactive design artifact';
 frame.setAttribute('sandbox','allow-scripts');
@@ -124,7 +125,10 @@ let readySignals=0;
 let consumedSignals=0;
 let lastHeartbeat=Date.now();
 const safe=value=>JSON.stringify(value).replaceAll('<',String.fromCharCode(92)+'u003c');
-const painted=()=>parent.postMessage(preview?{type:'fx0-artifact-painted',protocol:1,sessionId:preview.sessionId,revision:current.revision,documentId,updateReady:hotReady}:{type:'fx0-artifact-painted'},location.origin);
+// A child's rAF can run before this wrapper finishes loading. Revealing that
+// still-loading wrapper exposes the app background (black in dark mode).
+const painted=()=>{if(hasLoaded)parent.postMessage(preview?{type:'fx0-artifact-painted',protocol:1,sessionId:preview.sessionId,revision:current.revision,documentId,updateReady:hotReady}:{type:'fx0-artifact-painted'},location.origin);};
+addEventListener('load',()=>{hasLoaded=true;if(hasPainted)painted();},{once:true});
 const reply=(task,status,reason)=>parent.postMessage({type:'fx0-preview-result',protocol:1,sessionId:preview.sessionId,requestId:task.requestId,documentId:task.documentId,revision:task.payload.revision,status,...(reason?{reason}:{})},location.origin);
 const finish=(task,status,reason)=>{if(pending!==task)return;pending=null;task.controller.abort();reply(task,status,reason);};
 const restore=()=>{
