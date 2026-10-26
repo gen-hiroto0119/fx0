@@ -59,6 +59,11 @@ export function designCaptureScript(readyToken: string): string {
       const region = full
         ? { x: 0, y: root.getBoundingClientRect().top, width: innerWidth, height: Math.min(pageHeight, maxTiles * innerHeight + slack()) }
         : { x: 0, y: 0, width: innerWidth, height: innerHeight };
+      // Hot updates edit CSSOM declarations without changing the style element. An empty
+      // stylesheet mutation invalidates the fork's style caches without replacing app sheets.
+      const invalidation = document.createElement("style");
+      document.head.append(invalidation);
+      invalidation.remove();
       const page = await (await FastHtmlToImage.captureRegion(region, options)).toCanvas();
       const t2 = performance.now();
       const parts = full ? tiles(page) : [page];

@@ -763,15 +763,18 @@ async function frameWatchdog(relay = '') {
     querySelector: () => ({ append() {} }),
     addEventListener: (type, listener) => documentListeners.set(type, listener),
   }
-  const html = designFrameHtml(SAFE_DESIGN, 'watchdog-test', [], relay)
+  const html = designFrameHtml(SAFE_DESIGN, 'watchdog-test', [], undefined, { relay })
   runInNewContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], {
     document,
+    parent: {},
     Date: { now: () => now },
     Blob,
-    URL: { createObjectURL: () => 'blob:design' },
+    AbortController,
+    URL: { createObjectURL: () => 'blob:design', revokeObjectURL() {} },
     addEventListener: (type, listener) => listeners.set(type, listener),
     setInterval: (callback) => { check = callback },
     setTimeout() {},
+    clearTimeout() {},
   })
   await new Promise(setImmediate)
   assert.equal(loads, 1, 'the initial artifact loads')
