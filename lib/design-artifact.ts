@@ -73,12 +73,21 @@ export const DESIGN_FRAME_CSP = designFrameCsp()
 // Counted per place an image is written, so a repeated image cannot expand the design past it.
 export const MAX_EMBEDDED_IMAGE_BYTES = 4 * 1024 * 1024
 
+// The screenshot hook. `relay` is wrapper script, run before the design loads; `script`
+// returns the capture runtime for a child document carrying the given token.
+export interface DesignFrameCapture {
+  relay: string
+  script?: (readyToken: string) => string
+}
+
 // The page artifact-frame serves under designFrameCsp(): it frames the prepared design
 // and relays its heartbeat, paint and link messages to the app. Each image marker in the
 // design becomes its image, loaded from `src` (cached by the browser across revisions),
 // within MAX_EMBEDDED_IMAGE_BYTES counted per occurrence; a missing image is blank. Only
-// then does the design start, so it never needs the network.
-export function designFrameHtml(preparedArtifact: string, readyToken: string, images: { marker: string; src: string }[] = [], preview?: PreviewPayload): string {
+// then does the design start, so it never needs the network. `capture` is the screenshot
+// hook (lib/design-capture.ts): its relay runs in this wrapper, and every child document
+// the wrapper builds from a preview gets the runtime bound to that child's own token.
+export function designFrameHtml(preparedArtifact: string, readyToken: string, images: { marker: string; src: string }[] = [], preview?: PreviewPayload, capture?: DesignFrameCapture): string {
   // The design reaches its frame as a blob: URL the wrapper makes from this string,
   // not as a data: URL: browsers refuse data: URLs past 2 MiB, which embedded images
   // reach. A blob: document is local like data:, so it inherits this wrapper's CSP and
@@ -91,6 +100,11 @@ export function designFrameHtml(preparedArtifact: string, readyToken: string, im
   const childBootstrap = scriptJson(designArtifactBootstrap(bootstrapToken))
   const childCsp = scriptJson(`<meta http-equiv="Content-Security-Policy" content="${escapeAttribute(DESIGN_ARTIFACT_EMBEDDED_CSP)}">`)
   const updater = scriptJson(previewUpdateRuntime.toString())
+  // Built once with a placeholder token, then bound in the browser to each child's token: a
+  // child rebuilt by a restore must not keep the token of the document it replaced.
+  const runtimeToken = 'fx0-runtime-token'
+  const runtimeJs = capture?.script ? scriptJson(capture.script(runtimeToken)) : 'null'
+  const runtimeTarget = scriptJson(JSON.stringify(runtimeToken))
   // The wrapper paints nothing of its own, so a design that has not painted yet
   // shows the app's background. Sharing the app's color scheme keeps it
   // transparent; a design that sets no background still gets the browser's white.
@@ -124,6 +138,10 @@ frame.setAttribute('credentialless','');
 let readySignals=0;
 let consumedSignals=0;
 let lastHeartbeat=Date.now();
+// A capture can hold off restores while the design is busy photographing itself (lib/design-capture.ts).
+let holdUntil=0;
+// The capture runtime, bound to each child's own token by the restore that builds that child.
+const captureRuntimeJs=${runtimeJs};
 const safe=value=>JSON.stringify(value).replaceAll('<',String.fromCharCode(92)+'u003c');
 // A child's rAF can run before this wrapper finishes loading. Revealing that
 // still-loading wrapper exposes the app background (black in dark mode).
@@ -140,7 +158,8 @@ const restore=()=>{
     documentId=token=crypto.randomUUID();
     const seed={sessionId:preview.sessionId,revision:current.revision,sourceHtml:current.sourceHtml,renderHtml:html,documentId,parentOrigin:location.origin,token};
     const bootstrap=${childBootstrap}.replace(${scriptJson(JSON.stringify(bootstrapToken))},JSON.stringify(token));
-    html='<!doctype html>'+${childCsp}+bootstrap+'<script>('+${updater}+')('+safe(seed)+')</scr'+'ipt>'+html.slice('<!doctype html>'.length);
+    const runtime=captureRuntimeJs?captureRuntimeJs.replaceAll(${runtimeTarget},JSON.stringify(token)):'';
+    html='<!doctype html>'+${childCsp}+bootstrap+runtime+'<script>('+${updater}+')('+safe(seed)+')</scr'+'ipt>'+html.slice('<!doctype html>'.length);
   }
   const previous=artifact;
   artifact=URL.createObjectURL(new Blob([html],{type:'text/html;charset=utf-8'}));
@@ -213,8 +232,9 @@ setInterval(()=>{
     pending.remaining-=Math.max(0,elapsed);
     if(pending.remaining<=0){finish(pending,'reload','application-timeout');restore();return;}
   }
-  if(now-lastHeartbeat>3000)restore();
+  if(now-lastHeartbeat>3000&&now>holdUntil)restore();
 },500);
+${capture?.relay ?? ''}
 const read=(blob,signal)=>new Promise(done=>{
   const reader=new FileReader();
   const abort=()=>{reader.abort();complete(null);};
@@ -288,13 +308,14 @@ export function normalizeDesignArtifactHtml(html: string): string {
 // The CSP and bootstrap go right after the doctype, so they are the first things
 // the parser puts in <head>. A design stored before normalization renders the same
 // way; one without a doctype is not rendered at all (null), never without its CSP.
-export function prepareDesignArtifactHtml(html: string, embeddedCsp?: string, readyToken?: string): string | null {
+// `scripts` follow the bootstrap, under the same CSP (lib/design-capture.ts).
+export function prepareDesignArtifactHtml(html: string, embeddedCsp?: string, readyToken?: string, scripts = ''): string | null {
   const document = normalizeDesignArtifactHtml(html)
   if (!document.startsWith(DOCTYPE)) return null
   const csp = embeddedCsp
     ? `<meta http-equiv="Content-Security-Policy" content="${escapeAttribute(embeddedCsp)}">`
     : ''
-  return DOCTYPE + csp + designArtifactBootstrap(readyToken) + document.slice(DOCTYPE.length)
+  return DOCTYPE + csp + designArtifactBootstrap(readyToken) + scripts + document.slice(DOCTYPE.length)
 }
 
 // The start of a document, with invisible characters spelled out, so a rejected

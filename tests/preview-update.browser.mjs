@@ -12,6 +12,8 @@ import { join } from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { markRemoteImages } from '../lib/remote-image.ts'
+import { CAPTURE_TIMING_HEADER } from '../lib/capture-protocol.ts'
+import { DESIGN_CAPTURE_RELAY, designCaptureScript } from '../lib/design-capture.ts'
 import { BLANK_IMAGE, DESIGN_ARTIFACT_EMBEDDED_CSP, MAX_EMBEDDED_IMAGE_BYTES, designFrameCsp, designFrameHtml, prepareDesignArtifactHtml, validateDesignArtifactHtml } from '../lib/design-artifact.ts'
 
 // Opt-in, like design-artifact.browser.mjs. Node 24 supplies WebSocket and TS stripping.
@@ -118,14 +120,17 @@ import PreviewPane from './compiled/components/preview-pane.js'
 export function Fixture() {
   const [revision, setRevision] = useState(${initialRevision}), [viewing, setViewing] = useState(null)
   const [sessionId, setSession] = useState(${JSON.stringify(SESSION)}), [draft, setDraft] = useState(null)
-  const [accessAllowed, setAccessAllowed] = useState(true)
+  const [accessAllowed, setAccessAllowed] = useState(true), [capture, setCapture] = useState(null)
   useEffect(() => {
-    Object.assign(window, { setRevision, setViewing, setSession, setDraft, setAccessAllowed, fixtureReady: true })
+    window.captureResults = []
+    Object.assign(window, { setRevision, setViewing, setSession, setDraft, setAccessAllowed, setCapture, fixtureReady: true })
     const revoke = () => { setAccessAllowed(false); setRevision(0) }
     window.addEventListener('fx0:auth-required', revoke)
     return () => window.removeEventListener('fx0:auth-required', revoke)
   }, [])
-  return createElement(PreviewPane, { source: { kind: 'design', sessionId, revision }, viewing, draft, accessAllowed, intro: false, onClose: () => setRevision(0) })
+  return createElement(PreviewPane, { source: { kind: 'design', sessionId, revision }, viewing, draft, accessAllowed, intro: false, onClose: () => setRevision(0),
+    capture, onCaptureDone: (cid, answered) => { window.captureResults.push({ cid, answered }); setCapture(current => current?.cid === cid ? null : current) },
+  })
 }`)
   await writeFile(join(output, 'pane-entry.js'), `
 import { createElement } from 'react'
@@ -257,13 +262,13 @@ test('in Chrome, the production preview wrapper and React PreviewPane preserve s
   // not expensive pixel allocation. Three occurrences stay below the real budget.
   const largeImage = Buffer.alloc(Math.floor(1.1 * 1024 * 1024), 0x41)
   PIXEL.copy(largeImage)
-  const paneArtifacts = new Map(), paneLatest = new Map(), paneModes = new Map(), paneRequests = [], paneHeld = [], paneHtmlHeld = [], bundleHeld = []
+  const paneArtifacts = new Map(), paneLatest = new Map(), paneModes = new Map(), paneRequests = [], paneHeld = [], paneHtmlHeld = [], bundleHeld = [], paneCaptures = []
   let paneFixture, holdBundle = true
   let origin, chrome, cdp, chromeError = '', frameNumber = 0, requestNumber = 0, offRouteHits = 0
   const sendFrame = (response, preview) => {
     const prepared = prepareDesignArtifactHtml(preview.renderHtml, DESIGN_ARTIFACT_EMBEDDED_CSP, TOKEN)
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': designFrameCsp(`${origin}/api/artifact-image`) })
-    response.end(designFrameHtml(prepared, TOKEN, preview.images, preview))
+    response.end(designFrameHtml(prepared, TOKEN, preview.images, preview, { relay: DESIGN_CAPTURE_RELAY, script: designCaptureScript }))
   }
   const server = http.createServer((request, response) => {
     const url = new URL(request.url, 'http://fixture')
@@ -271,6 +276,19 @@ test('in Chrome, the production preview wrapper and React PreviewPane preserve s
     if (url.pathname === '/bundle.js' && paneFixture) {
       if (holdBundle) return void bundleHeld.push(response)
       return response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' }).end(paneFixture.bundle)
+    }
+    if (url.pathname === '/api/capture') {
+      const chunks = []
+      request.on('data', chunk => chunks.push(chunk))
+      request.on('end', async () => {
+        const form = request.headers['content-type']?.startsWith('multipart/form-data')
+          ? await new Response(Buffer.concat(chunks), { headers: { 'content-type': request.headers['content-type'] } }).formData() : null
+        paneCaptures.push({ cid: url.searchParams.get('cid'), failed: url.searchParams.get('failed'),
+          images: form?.getAll('image').map(image => ({ type: image.type, size: image.size })) ?? [],
+          timing: JSON.parse(request.headers[CAPTURE_TIMING_HEADER] ?? '{}') })
+        response.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}')
+      })
+      return
     }
     if (url.pathname === '/api/artifact-frame') {
       const session = url.searchParams.get('session'), wanted = Number(url.searchParams.get('revision') ?? url.searchParams.get('v'))
@@ -771,6 +789,8 @@ test('in Chrome, the production preview wrapper and React PreviewPane preserve s
       const iframeCount = () => evaluate("document.querySelectorAll('#preview-pane iframe').length")
       const status = () => evaluate("document.querySelector('#preview-pane [role=status]')?.textContent ?? ''")
       const htmlCount = () => paneRequests.filter(r => !r.json).length
+      const askCapture = (cid, revision, sessionId = SESSION) => evaluate(`setCapture({ cid: ${JSON.stringify(cid)}, revision: ${revision}, sessionId: ${JSON.stringify(sessionId)}, receivedAt: Date.now() })`)
+      const captureResult = cid => until(() => evaluate(`captureResults.find(result => result.cid === ${JSON.stringify(cid)})`), `capture result ${cid}`)
       try {
         publish(101)
         await cdp.call('Page.navigate', { url: `${origin}/pane` })
@@ -798,8 +818,32 @@ test('in Chrome, the production preview wrapper and React PreviewPane preserve s
         await evaluate("setDraft('<!doctype html><html><head></head><body><p>Unpublished draft</p></body></html>'); setRevision(102)")
         assert.equal((await applied(103)).documentId, initialPaint)
         preserved(before, await waitPane(s => s.title === 'Server already at 103' && s.color === 'rgb(30, 40, 50)'))
+        // Delay the real renderer, not its pixels: a publish in this window must wait
+        // until the screenshot is fixed, rather than relabeling revision 104 as 103.
+        await evaluate(`{
+          const library = FastHtmlToImage
+          FastHtmlToImage = { ...library, captureRegion: async (...args) => {
+            window.capturePaused = true
+            await new Promise(resolve => { window.releasePhoto = resolve })
+            FastHtmlToImage = library
+            return library.captureRegion(...args)
+          } }
+        }`, 2)
+        await askCapture('applied-103', 103)
+        await until(() => evaluate('window.capturePaused === true', 2), 'real screenshot paused before rendering')
         publish(104, { color: 'rgb(60, 70, 80)', title: 'Next patch after actual revision', padding: 12 })
         await evaluate('setRevision(104)')
+        await sleep(150)
+        assert.equal((await paneState()).title, 'Server already at 103', 'hot application waits for the in-flight photo')
+        assert.equal(paneRequests.some(request => request.wanted === 104), false, 'the new revision remains queued during capture')
+        await evaluate('releasePhoto()', 2)
+        assert.equal((await captureResult('applied-103')).answered, true)
+        const photo = paneCaptures.find(capture => capture.cid === 'applied-103')
+        assert.equal(photo?.failed, null, 'the applied revision is capturable even while its mount URL and requested revision are older')
+        assert.equal(photo?.timing.path, 'preview')
+        assert.equal(photo?.images.length, 1)
+        assert.ok(photo.images[0].type.startsWith('image/') && photo.images[0].size > 0, 'the real capture handler uploads image bytes')
+        preserved(before, await paneState())
         assert.equal((await applied(104)).documentId, initialPaint)
         preserved(before, await waitPane(s => s.title === 'Next patch after actual revision' && s.padding === '12px' && s.color === 'rgb(60, 70, 80)'))
         assert.equal(await evaluate('initialPaneFrame === document.querySelector(' + JSON.stringify(frontSelector) + ')'), true)
@@ -807,6 +851,9 @@ test('in Chrome, the production preview wrapper and React PreviewPane preserve s
         assert.equal(htmlCount(), initialHtmlCount, 'compatible effects never navigate src or execute a candidate frame')
         assert.equal((await observed()).boots.length, 1)
         assert.equal(await iframeCount(), 1, 'a draft cannot cover the published interactive design')
+        await askCapture('stale-mount-101', 101)
+        assert.equal((await captureResult('stale-mount-101')).answered, false, 'the original mount URL cannot label the patched document as the old revision')
+        assert.equal(paneCaptures.some(capture => capture.cid === 'stale-mount-101'), false)
         const requestsBeforeOldEvent = paneRequests.length
         await evaluate('setDraft(null); setRevision(103)')
         await sleep(150)
@@ -905,6 +952,9 @@ test('in Chrome, the production preview wrapper and React PreviewPane preserve s
         assert.equal(paneRequests.length, requestsBeforeZero)
         assert.equal(await status(), '')
         assert.equal(await iframeCount(), 0, 'a retained draft or late result cannot revive the private scope')
+        await askCapture('revoked-scope', 1, otherSession)
+        assert.equal((await captureResult('revoked-scope')).answered, false, 'revoked access never photographs a retained private frame')
+        assert.equal(paneCaptures.some(capture => capture.cid === 'revoked-scope'), false)
         // Revision zero still supports a legitimate authorized first-generation draft.
         await evaluate("setAccessAllowed(true);setDraft('<!doctype html><html><head></head><body><p>Authorized first draft</p></body></html>')")
         await until(() => evaluate("!!document.querySelector('iframe[title=\"Design preview while generating\"]')"), 'authorized first-generation draft remains supported')

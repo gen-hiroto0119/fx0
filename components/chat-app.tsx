@@ -37,6 +37,7 @@ const DebugPanel = dynamic(() => import('./debug-panel'), { ssr: false })
 import DesignExport from './design-export'
 import { Skeleton } from './ui/skeleton'
 import PreviewPane, { type PreviewSource } from './preview-pane'
+import DesignCapture, { acknowledgeCapture, type CaptureRequest } from './design-capture'
 import Sidebar from './sidebar'
 import SidebarGestures, { type SidebarGestureControls } from './sidebar-gestures'
 import { Button } from './ui/button'
@@ -280,6 +281,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
   const [entries, setEntries] = useState<ChatEntry[]>(initialState.entries)
   const [artifactRevision, setArtifactRevision] = useState(initialState.view.artifactRevision)
   const [designDraft, setDesignDraft] = useState<{ id: string; html: string } | null>(null)
+  const [captureRequest, setCaptureRequest] = useState<CaptureRequest | null>(null)
   const [viewedRevision, setViewedRevision] = useState<{ sessionId: string; revision: number; latest: number } | null>(null)
   const [activeTurnId, setActiveTurnId] = useState<number | null>(initialState.activeTurnId)
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(initialState.activeTurnStartedAt)
@@ -728,6 +730,19 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
         }
       }
       if (item.type === 'heartbeat') return
+      // screenshot_design asks every tab; only a visible one can paint the design, so only it
+      // takes the request. It acknowledges at once, alongside the capture; a capture that is no
+      // longer open (an event replayed after a reconnect) answers false and is dropped.
+      if (item.type === 'capture') {
+        if (item.cid && document.visibilityState === 'visible') {
+          const request: CaptureRequest = { cid: item.cid, sessionId: sourceSessionId, revision: item.artifactRevision ?? 0, full: item.captureFull === true, receivedAt: Date.now() }
+          setCaptureRequest(request)
+          void acknowledgeCapture(request).then((open) => {
+            if (!open) setCaptureRequest((current) => (current?.cid === request.cid ? null : current))
+          })
+        }
+        return
+      }
       if (item.type === 'turn_start') {
         setAwaiting(false)
         setActiveTurnId(item.id ?? null)
@@ -2093,9 +2108,19 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
                 accessAllowed={!authBlocked && signOutStatus == null}
                 intro={view.snapshot.transcript.entries.length === 0}
                 onClose={closePreview}
+                capture={captureRequest && !captureRequest.offscreen && captureRequest.sessionId === view.sessionId ? captureRequest : null}
+                onCaptureDone={(cid, answered) => setCaptureRequest((current) =>
+                  current?.cid !== cid ? current : answered ? null : { ...current, offscreen: true })}
               />
             ))}
           </>
+        )}
+        {captureRequest && (captureRequest.offscreen || !previewOpen) && (
+          <DesignCapture
+            key={captureRequest.cid}
+            request={captureRequest}
+            onDone={(cid) => setCaptureRequest((current) => (current?.cid === cid ? null : current))}
+          />
         )}
       </main>
 

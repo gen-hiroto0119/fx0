@@ -113,6 +113,8 @@ const mocks = {
       return { html: s.liveRevision === 0 ? null : '<!doctype html><html><head><title>private design</title></head><body>private artifact</body></html>', revision: s.liveRevision ?? 1 };
     }
     export async function currentSeq(id) { record('seq', id); return 0; }
+    export async function acknowledgeCapture(id) { record('capture-ack', id); return true; }
+    export async function answerCapture(id, cid, answer) { record('capture-answer', id); globalThis.securityTest.captureAnswer = answer; return true; }
   `,
   'lib/agent.ts': `
     function effect(name, host) {
@@ -263,7 +265,7 @@ function request(path, method = 'GET', id = own, body, origin = process.env.APP_
   return req
 }
 const routes = {}
-for (const name of ['answer', 'artifact', 'artifact-frame', 'artifact-image', 'cancel', 'debug', 'events',
+for (const name of ['answer', 'artifact', 'artifact-frame', 'capture', 'artifact-image', 'cancel', 'debug', 'events',
   'credits', 'model', 'prompt', 'session', 'sessions', 'teams', 'warm']) {
   routes[name] = await import(`../app/api/${name}/route.ts`)
 }
@@ -421,6 +423,63 @@ test('session routes return indistinguishable 404 for unknown and foreign IDs be
   }
 })
 
+test('a tab acknowledges a capture and reports a known failure; an unknown reason is refused', async () => {
+  const s = reset()
+  const post = (query) => routes.capture.POST(new Request(`https://fx0.example/api/capture?session=${own}&cid=${'1'.repeat(8)}-1111-1111-1111-${'1'.repeat(12)}&${query}`, {
+    method: 'POST', headers: { origin: process.env.APP_URL },
+  }))
+  const ack = await post('ack=1')
+  assert.equal(ack.status, 200)
+  assert.deepEqual(await ack.json(), { ok: true })
+  assert.ok(s.trace.includes('capture-ack'))
+  const failed = await post('failed=too-large')
+  assert.deepEqual(await failed.json(), { ok: true })
+  assert.deepEqual(s.captureAnswer, { kind: 'failed', reason: 'too-large' })
+  assert.equal((await post('failed=__proto__')).status, 400)
+  assert.equal((await post('failed=anything')).status, 400)
+  const unsized = await post('w=1')
+  assert.equal(unsized.status, 411, 'a photo without a length is refused before it is read')
+})
+
+test('a photo reaches the waiting call; one the route refuses still answers it, with the reason', async () => {
+  const s = reset()
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64')
+  const upload = async (files, query = 'w=1280&h=800', length) => {
+    const form = new FormData()
+    for (const file of files) form.append('image', new Blob([file], { type: 'image/png' }))
+    const encoded = new Response(form)
+    const body = await encoded.arrayBuffer()
+    return routes.capture.POST(new Request(`https://fx0.example/api/capture?session=${own}&cid=${'2'.repeat(8)}-2222-2222-2222-${'2'.repeat(12)}&${query}`, {
+      method: 'POST', body,
+      headers: { origin: process.env.APP_URL, 'content-type': encoded.headers.get('content-type'), 'content-length': String(length ?? body.byteLength) },
+    }))
+  }
+  const accepted = await upload([PNG], 'w=1280&h=2400&truncated=1')
+  assert.deepEqual(await accepted.json(), { ok: true })
+  assert.equal(s.captureAnswer.kind, 'shot')
+  assert.deepEqual(s.captureAnswer.shot.images, [{ mimeType: 'image/png', data: PNG.toString('base64') }])
+  assert.deepEqual([s.captureAnswer.shot.width, s.captureAnswer.shot.height, s.captureAnswer.shot.truncated], [1280, 2400, true])
+  for (const [files, length, status, reason] of [
+    [[Buffer.from('not an image at all')], undefined, 415, 'refused'],
+    [Array(9).fill(PNG), undefined, 400, 'refused'],
+    [[PNG], 10 * 1024 * 1024, 413, 'too-large'],
+  ]) {
+    s.captureAnswer = null
+    assert.equal((await upload(files, undefined, length)).status, status)
+    assert.deepEqual(s.captureAnswer, { kind: 'failed', reason }, `a ${status} answers the call`)
+  }
+})
+
+test('a capture for an unknown or foreign chat is refused before its body or Redis', async () => {
+  for (const id of [foreign, fresh]) {
+    const s = reset()
+    const response = await routes.capture.POST(request('capture', 'POST', id))
+    assert.equal(response.status, 404)
+    assert.deepEqual(s.trace, ['auth', 'owner'])
+    assert.deepEqual(s.redisReads, [])
+  }
+})
+
 test('the same owner can steer, enqueue or recover a chat after switching teams, with one owner check', async () => {
   for (const [name, method, body] of sessionRoutes) {
     const oldContext = reset()
@@ -440,7 +499,7 @@ test('the same owner can steer, enqueue or recover a chat after switching teams,
 
 test('session routes and creation reject unverified team grants before runtime or writes', async () => {
   for (const teamId of [undefined, 'user_a']) {
-    for (const [name, method, body] of [...sessionRoutes, ['sessions', 'POST']]) {
+    for (const [name, method, body] of [...sessionRoutes, ['sessions', 'POST'], ['capture', 'POST']]) {
       const s = reset({ session: session({ teamId }) })
       const response = await routes[name][method](request(name, method, own, body))
       assert.equal(response.status, 403, `${method} ${name}`)
@@ -598,8 +657,10 @@ test('the artifact preview paints no white of its own before the design does', a
   reset()
   const html = await (await routes['artifact-frame'].GET(request('artifact-frame', 'GET', own, undefined, 'null'))).text()
   // The app's color scheme keeps the wrapper transparent over the app's background.
-  assert.match(html, /:root\{color-scheme:light dark\}/)
-  assert.doesNotMatch(html, /background:#fff/)
+  // The design (and the capture library) travel inside the wrapper's script; only its own markup counts.
+  const wrapper = html.slice(0, html.indexOf('<script>'))
+  assert.match(wrapper, /:root\{color-scheme:light dark\}/)
+  assert.doesNotMatch(wrapper, /background:#fff/)
 })
 
 test('the browser keeps a preview only when its URL names the revision that is live', async () => {

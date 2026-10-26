@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { designLinkUrl } from '../lib/design-link'
 import { EMPTY_DRAFT_DOCUMENT, patchDraftDocument } from '../lib/draft-preview'
+import { CAPTURE_PAINT_MS, CAPTURE_PREVIEW_START_MS, type CaptureFailure } from '../lib/capture-protocol'
+import { captureFrame, reportCaptureFailure, sendCapture, type CaptureRequest } from './design-capture'
 import { PREVIEW_PREPARE_MS, PREVIEW_PROTOCOL, type PreviewPayload } from '../lib/preview-update'
 import { AuthRouteError, fetchUi } from './auth-ui'
 import DesignLinkDialog from './design-link-dialog'
@@ -60,6 +62,8 @@ export default function PreviewPane({
   accessAllowed = true,
   intro,
   onClose,
+  capture = null,
+  onCaptureDone,
 }: {
   source: PreviewSource
   // A past revision opened from the transcript's "View" link, never the latest; null is the latest.
@@ -71,6 +75,10 @@ export default function PreviewPane({
   // Only an empty chat explains fx0; a chat waiting on its first design stays blank.
   intro: boolean
   onClose: () => void
+  // A screenshot_design request; the preview answers from the frame on screen.
+  capture?: CaptureRequest | null
+  // Whether this preview answered (a photo or a failure); when not, the hidden copy should.
+  onCaptureDone?: (cid: string, answered: boolean) => void
 }) {
   const scope = JSON.stringify([source.sessionId, viewing, accessAllowed])
   const currentScope = useRef(scope)
@@ -78,6 +86,10 @@ export default function PreviewPane({
   const frames = useRef<(HTMLIFrameElement | null)[]>([null, null])
   const demand = useRef<(revision: number, retry?: boolean) => void>(() => {})
   const retry = useRef(() => {})
+  // Capture and hot application share a document: never mutate it mid-photo.
+  const capturingScope = useRef<string | null>(null)
+  const canCapture = useRef<() => boolean>(() => false)
+  const resumeUpdates = useRef(() => {})
   const [display, setDisplay] = useState<PreviewDisplay>(() => {
     const revision = accessAllowed && source.revision > 0 ? (viewing ?? source.revision) : 0
     const slot: PreviewSlot | null = revision > 0 ? {
@@ -103,6 +115,8 @@ export default function PreviewPane({
       setLinkRequest(null)
       demand.current = () => {}
       retry.current = () => {}
+      canCapture.current = () => false
+      resumeUpdates.current = () => {}
       return
     }
     const sessionId = source.sessionId
@@ -192,7 +206,7 @@ export default function PreviewPane({
     }
 
     const pump = async () => {
-      if (!active() || !desired || error || attempt || loading != null) return
+      if (!active() || !desired || error || attempt || loading != null || capturingScope.current === scope) return
       const shown = front == null ? null : slots[front]
       // A legacy wrapper can confirm a full load, but cannot advertise hot updates.
       if (shown && (shown.appliedRevision ?? shown.requestedRevision) >= desired) return
@@ -235,6 +249,11 @@ export default function PreviewPane({
         // A response may already be ahead of its journal event. Never send an
         // older revision back into the confirmed document.
         if (shown?.appliedRevision != null && payload.revision <= shown.appliedRevision) {
+          clearAttempt()
+          return
+        }
+        // Acquisition can finish after a photo started; leave desired queued until it ends.
+        if (capturingScope.current === scope) {
           clearAttempt()
           return
         }
@@ -294,6 +313,8 @@ export default function PreviewPane({
       void pump()
     }
     retry.current = () => demand.current(desired, true)
+    canCapture.current = () => active() && !attempt?.posted && capturingScope.current !== scope
+    resumeUpdates.current = () => { void pump() }
     setLinkRequest(null)
     publish()
 
@@ -388,6 +409,8 @@ export default function PreviewPane({
       document.removeEventListener('visibilitychange', onVisibilityChange)
       demand.current = () => {}
       retry.current = () => {}
+      canCapture.current = () => false
+      resumeUpdates.current = () => {}
     }
   }, [source.sessionId, viewing, scope, accessAllowed])
 
@@ -398,6 +421,69 @@ export default function PreviewPane({
   const current = display.scope === scope
   const slots: PreviewDisplay['slots'] = current ? display.slots : [null, null]
   const front = current ? display.front : null
+  // Hot patches keep the mount URL: only the confirmed applied revision identifies
+  // the design on screen. Never capture a frame retained from another scope.
+  const captureDone = useRef(onCaptureDone)
+  captureDone.current = onCaptureDone
+  const waitingCapture = useRef<{ request: CaptureRequest; timer: ReturnType<typeof setTimeout>; loading: boolean } | null>(null)
+  const settleCapture = (request: CaptureRequest): boolean => {
+    if (waitingCapture.current?.request !== request) return false
+    clearTimeout(waitingCapture.current.timer)
+    waitingCapture.current = null
+    return true
+  }
+  const handOffCapture = (request: CaptureRequest) => {
+    if (settleCapture(request)) captureDone.current?.(request.cid, false)
+  }
+  const failCapture = (request: CaptureRequest, reason: CaptureFailure = 'not-painted') => {
+    if (settleCapture(request)) void reportCaptureFailure(request, reason).finally(() => captureDone.current?.(request.cid, true))
+  }
+  useEffect(() => {
+    if (!capture) return
+    const request = capture
+    waitingCapture.current = { request, timer: setTimeout(() => handOffCapture(request), CAPTURE_PREVIEW_START_MS), loading: false }
+    return () => handOffCapture(request)
+  }, [capture?.cid, scope]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const waiting = waitingCapture.current
+    if (!waiting) return
+    const { request } = waiting
+    if (!accessAllowed || !current || request.sessionId !== source.sessionId || viewing != null) return handOffCapture(request)
+    const index = slots.findIndex((slot) => slot?.appliedRevision === request.revision)
+    const frame = index < 0 ? null : frames.current[index]
+    if (!frame && source.revision !== request.revision) return
+    if (frame && frame.getBoundingClientRect().width < 1) return handOffCapture(request)
+    if (!frame || front !== index || !frame.contentWindow) {
+      if (!waiting.loading) {
+        clearTimeout(waiting.timer)
+        waiting.loading = true
+        waiting.timer = setTimeout(() => failCapture(request), CAPTURE_PAINT_MS)
+      }
+      return
+    }
+    if (!canCapture.current()) return failCapture(request, 'capture-failed')
+    settleCapture(request)
+    capturingScope.current = scope
+    const askedAt = Date.now()
+    let released = false
+    const releaseCapture = () => {
+      if (released) return
+      released = true
+      if (capturingScope.current === scope) capturingScope.current = null
+      resumeUpdates.current()
+    }
+    void captureFrame(frame.contentWindow, request.cid, request.full)
+      .then((reply) => {
+        // Bytes are fixed now; a slow upload must not hold later preview updates.
+        releaseCapture()
+        if (currentScope.current !== scope) return reportCaptureFailure(request, 'capture-failed')
+        return sendCapture(request, reply, { path: 'preview', askedAt })
+      })
+      .finally(() => {
+        releaseCapture()
+        captureDone.current?.(request.cid, true)
+      })
+  }, [capture?.cid, current, slots, front, source.sessionId, source.revision, viewing, accessAllowed]) // eslint-disable-line react-hooks/exhaustive-deps
   const published = front != null
   const [heldDraft, setHeldDraft] = useState<{ scope: string; html: string } | null>(null)
   const liveDraft = accessAllowed && draft && renderable(draft) ? draft : null

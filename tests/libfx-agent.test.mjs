@@ -60,6 +60,12 @@ globalThis.__fx0Agent = {
 durableAgent({ toolHost: async () => { throw new Error('no tools here') } }, 'instructions')
 const agentFetch = agentOptions.fetch
 
+test('screenshots in one response take turns: a chat has one capture open at a time', () => {
+  const screenshot = agentOptions.tools.find((tool) => tool.name === 'screenshot_design')
+  assert.equal(screenshot.idempotent, true)
+  assert.equal(screenshot.writes, true, 'a tool that writes never runs beside another call')
+})
+
 test('a recovered sponsored chat uses its recorded trial funding instead of requiring a customer card', async (t) => {
   const previous = { key: process.env.AI_GATEWAY_API_KEY, enabled: process.env.FX0_FREE_PROMPTS }
   process.env.AI_GATEWAY_API_KEY = 'synthetic-server-key'

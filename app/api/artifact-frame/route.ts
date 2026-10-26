@@ -1,5 +1,6 @@
 import { ARTIFACT_IMAGE_PATH, artifactImageSrc } from '../../../lib/artifact-image'
 import { DESIGN_ARTIFACT_EMBEDDED_CSP, designFrameCsp, designFrameHtml, normalizeDesignArtifactHtml, prepareDesignArtifactHtml, remoteImagesEnabled } from '../../../lib/design-artifact'
+import { DESIGN_CAPTURE_RELAY, designCaptureScript } from '../../../lib/design-capture'
 import { PREVIEW_PROTOCOL, type PreviewPayload } from '../../../lib/preview-update'
 import { markRemoteImages } from '../../../lib/remote-image'
 import { readDesignArtifactAt } from '../../../lib/journal'
@@ -57,7 +58,8 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
       artifact != null ? 'This design could not be prepared for preview.'
         : past ? 'This version is not in the history.' : 'No design artifact has been published for this session.'
     }</p></body></html>`
-  const html = designFrameHtml(preparedArtifact, readyToken, images, payload ?? undefined)
+  // Every preview is photographed where it is (lib/design-capture.ts): the wrapper gives each child document its own capture runtime.
+  const html = designFrameHtml(preparedArtifact, readyToken, images, payload ?? undefined, { relay: DESIGN_CAPTURE_RELAY, script: designCaptureScript })
   return new Response(html, {
     status: artifact == null ? 404 : 200,
     headers: {
