@@ -119,6 +119,7 @@ html,body,#app{margin:0;height:100%}#preview-pane{height:100%;display:flex;flex-
 #preview-pane>div:last-of-type{position:relative;flex:1;min-height:720px}
 #preview-pane iframe{position:absolute;inset:0;width:1000px;height:720px;border:0}
 #preview-pane iframe[aria-hidden=true]{z-index:0;pointer-events:none}#preview-pane iframe:not([aria-hidden=true]){z-index:1}
+.relative{position:relative}.absolute{position:absolute}.inset-0{inset:0}.flex{display:flex}.flex-1{flex:1}.min-h-0{min-height:0}.z-20{z-index:20}.opacity-0{opacity:0}.bg-background{background:white}
 </style></head><body><script>${OBSERVER}</script><div id="app">${markup}</div><script defer src="/bundle.js"></script></body></html>`,
   }
 }

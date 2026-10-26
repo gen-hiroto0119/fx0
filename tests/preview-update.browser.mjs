@@ -1214,3 +1214,111 @@ test('in Chrome, the production preview wrapper and React PreviewPane preserve s
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
 })
+
+// The real first-generation capture exposed the draft -> published handoff before
+// the wrapper's load event: 8 black frames at 120 Hz. Hold the wrapper response open
+// after its scripts run, so its real child paints before the wrapper finishes loading.
+// No synthetic paint messages or replacement slot coordinator participate.
+test('first publish waits for wrapper load after child paint', { timeout: 60_000 }, async t => {
+  assert.ok(existsSync(CHROME), `Chrome not found at ${CHROME}; set CHROME_PATH`)
+  const dir = await mkdtemp(join(tmpdir(), 'fx0-first-publish-'))
+  const errors = []
+  const held = []
+  let chrome, cdp, chromeError = ''
+  const fixture = await buildPaneFixture(dir, null, { initialRevision: 0 })
+  const house = await readFile(new URL('./fixtures/simple-house.html', import.meta.url), 'utf8')
+  const candidate = payload(1, house)
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url, 'http://fixture')
+    if (url.pathname === '/') return response.writeHead(200, { 'content-type': 'text/html' }).end(fixture.html.replace('</style>', ':root{color-scheme:light dark}body,.bg-background{background:light-dark(white,black)}</style>'))
+    if (url.pathname === '/bundle.js') return response.writeHead(200, { 'content-type': 'text/javascript' }).end(fixture.bundle)
+    if (url.pathname === '/api/artifact-frame') {
+      if (url.searchParams.get('format') === 'json') return response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(candidate))
+      const prepared = prepareDesignArtifactHtml(candidate.renderHtml, DESIGN_ARTIFACT_EMBEDDED_CSP, TOKEN)
+      // Observe the real child's message without forwarding, delaying or replacing it.
+      const html = designFrameHtml(prepared, TOKEN, [], candidate).replace('<script>', `<script>
+window.childPainted = false;
+addEventListener('message', event => {
+  if (event.source === document.querySelector('#frame-root iframe')?.contentWindow && event.data?.type === 'painted') window.childPainted = true;
+});`)
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': designFrameCsp() })
+      response.write(html)
+      held.push(response)
+      return
+    }
+    response.writeHead(404).end()
+  })
+  try {
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+    chrome = spawn(CHROME, [
+      '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-proxy-server',
+      '--disable-background-networking', '--disable-component-update', '--disable-sync', '--disable-default-apps',
+      '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows',
+      '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',
+      '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', `--user-data-dir=${join(dir, 'profile')}`, 'about:blank',
+    ], { stdio: ['ignore', 'ignore', 'pipe'] })
+    let spawnError
+    chrome.on('error', error => { spawnError = error })
+    chrome.stderr.on('data', data => { chromeError = (chromeError + data).slice(-16_384) })
+    const port = await until(async () => {
+      if (spawnError) throw spawnError
+      assert.equal(chrome.exitCode, null, chromeError)
+      try { return (await readFile(join(dir, 'profile', 'DevToolsActivePort'), 'utf8')).split('\n')[0] }
+      catch (error) { if (error.code !== 'ENOENT') throw error }
+    }, 'Chrome debugging port')
+    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(8000) })).json()
+    cdp = await connectCdp(targets.find(target => target.type === 'page').webSocketDebuggerUrl, errors)
+    await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1000, height: 720, deviceScaleFactor: 1, mobile: false })
+    const origin = `http://127.0.0.1:${server.address().port}`
+    for (const scheme of ['light', 'dark']) await t.test(scheme, async () => {
+      await cdp.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] })
+      await cdp.call('Page.navigate', { url: `${origin}/?scheme=${scheme}` })
+      await until(() => cdp.evaluate('window.fixtureReady === true'), 'first-generation fixture')
+      try {
+        await cdp.evaluate(`setDraft(${JSON.stringify(house)})`)
+        await until(() => cdp.evaluate(`(() => {
+          const frame = document.querySelector('iframe[title="Design preview while generating"]');
+          return !!frame?.contentDocument?.getElementById('door') && getComputedStyle(frame).opacity === '1';
+        })()`), 'the real house draft is visible')
+        await cdp.evaluate(`window.originalDraft = document.querySelector('iframe[title="Design preview while generating"]'); setRevision(1); setDraft(null)`)
+        await until(() => cdp.evaluate(`!!document.querySelector('iframe[src]')?.contentWindow?.childPainted`), 'the real child paints while its wrapper response is still open')
+        // Let any erroneously forwarded paint reach React before checking its layers.
+        await cdp.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+        const beforeLoad = await cdp.evaluate(`(() => {
+          const wrapper = document.querySelector('iframe[src]');
+          return { readyState: wrapper.contentDocument.readyState, paints: observed.paints.length,
+            draftRetained: originalDraft.isConnected, draftOpacity: getComputedStyle(originalDraft).opacity,
+            wrapperOpacity: getComputedStyle(wrapper).opacity, hidden: wrapper.getAttribute('aria-hidden') };
+        })()`)
+        t.diagnostic(`${scheme} before wrapper load: ${JSON.stringify(beforeLoad)}`)
+        assert.notEqual(beforeLoad.readyState, 'complete', 'the HTTP fixture really delays wrapper load')
+        assert.equal(beforeLoad.paints, 0, 'child paint cannot retire the draft before the wrapper loads')
+        assert.equal(beforeLoad.draftRetained, true)
+        assert.equal(beforeLoad.draftOpacity, '1')
+        assert.equal(beforeLoad.wrapperOpacity, '0')
+        assert.equal(beforeLoad.hidden, 'true')
+        for (const response of held.splice(0)) response.end()
+        await until(() => cdp.evaluate(`observed.paints.length > 0 && !originalDraft.isConnected`), 'wrapper load releases the retained child paint and retires the draft')
+        assert.equal(await cdp.evaluate(`document.querySelector('iframe[title="Design artifact preview"]').contentDocument.readyState`), 'complete')
+        assert.equal(await cdp.evaluate(`document.querySelectorAll('#preview-pane iframe').length`), 1, 'the handoff leaves only the interactive frame')
+        assert.deepEqual(await cdp.evaluate('observed.errors'), [])
+      } finally {
+        for (const response of held.splice(0)) response.end()
+      }
+    })
+    assert.deepEqual(errors, [], 'no browser execution errors')
+  } finally {
+    if (cdp) await cdp.close()
+    if (chrome && chrome.exitCode === null && chrome.signalCode === null) {
+      const exited = new Promise(resolve => chrome.once('exit', resolve))
+      chrome.kill('SIGTERM')
+      await Promise.race([exited, sleep(2000, undefined, { ref: false })])
+      if (chrome.exitCode === null && chrome.signalCode === null) { chrome.kill('SIGKILL'); await exited }
+    }
+    chrome?.stderr.destroy()
+    server.closeAllConnections()
+    await new Promise(resolve => server.close(resolve))
+    for (const response of held) response.destroy()
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  }
+})
