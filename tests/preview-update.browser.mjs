@@ -1,11 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { execFile, spawn } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
-import { registerHooks } from 'node:module'
-import { fileURLToPath, pathToFileURL } from 'node:url'
-import { promisify } from 'node:util'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -15,6 +12,7 @@ import { markRemoteImages } from '../lib/remote-image.ts'
 import { CAPTURE_TIMING_HEADER } from '../lib/capture-protocol.ts'
 import { DESIGN_CAPTURE_RELAY, designCaptureScript } from '../lib/design-capture.ts'
 import { BLANK_IMAGE, DESIGN_ARTIFACT_EMBEDDED_CSP, MAX_EMBEDDED_IMAGE_BYTES, designFrameCsp, designFrameHtml, prepareDesignArtifactHtml, validateDesignArtifactHtml } from '../lib/design-artifact.ts'
+import { LEGACY_BASELINE, OBSERVER, buildPaneFixture } from './helpers/preview-pane-fixture.mjs'
 
 // Opt-in, like design-artifact.browser.mjs. Node 24 supplies WebSocket and TS stripping.
 // One Chrome and sequential cases keep this suite from spawning a browser per assertion.
@@ -22,6 +20,12 @@ const CHROME = process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Conte
 const PIXEL = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
 const SESSION = 'preview-browser-session'
 const TOKEN = 'preview-browser-ready'
+// Opt-in experiment only (FX0_PREVIEW_PERF=1): it replaces the regular cases with a perf comparison.
+const PERF = process.env.FX0_PREVIEW_PERF === '1'
+const median = values => {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b), middle = sorted.length >> 1
+  return sorted.length === 0 ? null : sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2
+}
 
 function design({ color = 'rgb(10, 20, 30)', title = 'Original title', padding = 4, image = '', photo = false, program = 'original', structure = '', beforeLoad = '', sheetId = true } = {}) {
   return `<!doctype html><html><head><title>Interactive presentation</title>
@@ -73,27 +77,6 @@ function payload(revision, html, imageName) {
   }
 }
 
-// Observe real window messages without intercepting any production listener or send.
-const OBSERVER = `
-window.observed = { paints: [], results: [], boots: [], reports: [], errors: [] }
-addEventListener('message', event => {
-  const frames = [...document.querySelectorAll('#active, #preview-pane iframe')], data = event.data
-  if (!data || typeof data !== 'object') return
-  const wrapper = frames.find(frame => event.source === frame.contentWindow)
-  if (wrapper && event.origin === location.origin) {
-    const entry = { ...data, mountUrl: wrapper.getAttribute('src') }
-    if (data.type === 'fx0-artifact-painted') observed.paints.push(entry)
-    if (data.type === 'fx0-preview-result') observed.results.push(entry)
-  }
-  const frame = frames.find(frame => event.source === frame.contentWindow.frames[0])
-  if (frame && data.fixture === 'preview-update') {
-    const entry = { ...data, mountUrl: frame.getAttribute('src') }
-    if (data.kind === 'boot') observed.boots.push(entry)
-    if (data.kind === 'state') { observed.reports.push(entry); if (observed.reports.length > 30) observed.reports.shift() }
-    if (data.kind === 'error') observed.errors.push(data.error)
-  }
-})`
-
 const PARENT = `<!doctype html><html><head><title>Preview update browser test</title>
 <style>html,body{margin:0}iframe{width:1000px;height:720px;border:0}</style></head><body><script>${OBSERVER}
 window.mount = url => {
@@ -102,80 +85,6 @@ window.mount = url => {
   const frame = document.createElement('iframe'); frame.id = 'active'; frame.src = url; document.body.append(frame)
 }
 </script></body></html>`
-
-async function buildPaneFixture(directory, initialRevision = 101) {
-  const output = await realpath(directory), root = fileURLToPath(new URL('../', import.meta.url))
-  // Same narrow compile as html-ui.test.mjs, using this test's Node 24 executable.
-  await promisify(execFile)(process.execPath, [join(root, 'node_modules/typescript/bin/tsc'),
-    '--ignoreConfig', '--outDir', join(output, 'compiled'), '--strict', '--types', 'node',
-    '--jsx', 'react-jsx', '--target', 'esnext', '--module', 'esnext',
-    '--moduleResolution', 'bundler', '--skipLibCheck', '--esModuleInterop', 'components/preview-pane.tsx',
-  ], { cwd: root, maxBuffer: 4 * 1024 * 1024 })
-  await writeFile(join(output, 'package.json'), '{"type":"module"}')
-  // These controls change only the real component's props. No replacement hooks,
-  // updater, transport or slot coordinator is bundled into the fixture.
-  await writeFile(join(output, 'pane-fixture.js'), `
-import { createElement, useEffect, useState } from 'react'
-import PreviewPane from './compiled/components/preview-pane.js'
-export function Fixture() {
-  const [revision, setRevision] = useState(${initialRevision}), [viewing, setViewing] = useState(null)
-  const [sessionId, setSession] = useState(${JSON.stringify(SESSION)}), [draft, setDraft] = useState(null)
-  const [accessAllowed, setAccessAllowed] = useState(true), [capture, setCapture] = useState(null)
-  useEffect(() => {
-    window.captureResults = []
-    Object.assign(window, { setRevision, setViewing, setSession, setDraft, setAccessAllowed, setCapture, fixtureReady: true })
-    const revoke = () => { setAccessAllowed(false); setRevision(0) }
-    window.addEventListener('fx0:auth-required', revoke)
-    return () => window.removeEventListener('fx0:auth-required', revoke)
-  }, [])
-  return createElement(PreviewPane, { source: { kind: 'design', sessionId, revision }, viewing, draft, accessAllowed, intro: false, onClose: () => setRevision(0),
-    capture, onCaptureDone: (cid, answered) => { window.captureResults.push({ cid, answered }); setCapture(current => current?.cid === cid ? null : current) },
-  })
-}`)
-  await writeFile(join(output, 'pane-entry.js'), `
-import { createElement } from 'react'
-import { hydrateRoot } from 'react-dom/client'
-import { Fixture } from './pane-fixture.js'
-hydrateRoot(document.getElementById('app'), createElement(Fixture), { onRecoverableError: error => observed.errors.push(error.message) })
-`)
-  const { default: bundledWebpack } = await import('../node_modules/next/dist/compiled/webpack/webpack.js')
-  const compiler = bundledWebpack.webpack({
-    // Next's packaged webpack references a terser entry absent in this install.
-    // Production React is still selected; minification is not under test here.
-    mode: 'production', optimization: { minimize: false }, target: 'web', entry: join(output, 'pane-entry.js'),
-    output: { path: join(output, 'browser'), filename: 'bundle.js' },
-    module: { rules: [{ test: /\.js$/, resolve: { fullySpecified: false } }] },
-    resolve: { modules: [join(root, 'node_modules')], extensions: ['.js'], extensionAlias: { '.ts': ['.js'] } },
-  })
-  try {
-    const stats = await promisify(compiler.run.bind(compiler))()
-    assert.equal(stats.hasErrors(), false, stats.toString({ all: false, errors: true }))
-  } finally { await promisify(compiler.close.bind(compiler))() }
-
-  const outputUrl = pathToFileURL(`${output}/`).href, projectUrl = new URL('../package.json', import.meta.url).href
-  const hooks = registerHooks({ resolve(specifier, context, nextResolve) {
-    if (!context.parentURL?.startsWith(outputUrl)) return nextResolve(specifier, context)
-    if (specifier.startsWith('.')) return nextResolve(/\.js$/.test(specifier) ? specifier : `${specifier.replace(/\.ts$/, '')}.js`, context)
-    return nextResolve(specifier, { ...context, parentURL: projectUrl })
-  } })
-  let markup
-  try {
-    const [{ Fixture }, { createElement }, { renderToString }] = await Promise.all([
-      import(pathToFileURL(join(output, 'pane-fixture.js')).href), import('react'), import('react-dom/server'),
-    ])
-    markup = renderToString(createElement(Fixture))
-  } finally { hooks.deregister() }
-  return {
-    bundle: await readFile(join(output, 'browser/bundle.js')),
-    html: `<!doctype html><html><head><meta charset="utf-8"><title>Real PreviewPane</title><style>
-html,body,#app{margin:0;height:100%}#preview-pane{height:100%;display:flex;flex-direction:column}
-#preview-pane>div:last-of-type{position:relative;flex:1;min-height:720px}
-#preview-pane iframe{position:absolute;inset:0;width:1000px;height:720px;border:0}
-#preview-pane iframe[aria-hidden=true]{z-index:0;pointer-events:none}#preview-pane iframe:not([aria-hidden=true]){z-index:1}
-.relative{position:relative}.absolute{position:absolute}.inset-0{inset:0}.flex{display:flex}.flex-1{flex:1}.min-h-0{min-height:0}.z-20{z-index:20}.opacity-0{opacity:0}.bg-background{background:white}
-</style></head><body><script>${OBSERVER}</script><div id="app">${markup}</div><script defer src="/bundle.js"></script></body></html>`,
-  }
-}
 
 async function until(read, label, milliseconds = 8000) {
   const deadline = Date.now() + milliseconds
@@ -254,7 +163,7 @@ async function connectCdp(url, errors) {
   return { call, evaluate, close: async () => { socket.close(); await Promise.race([closed, sleep(1000, undefined, { ref: false })]) } }
 }
 
-test('in Chrome, the production preview wrapper and React PreviewPane preserve state, reload safely and recover', { timeout: 180_000 }, async t => {
+test('in Chrome, the production preview wrapper and React PreviewPane preserve state, reload safely and recover', { timeout: PERF ? 200_000 : 180_000 }, async t => {
   assert.ok(existsSync(CHROME), `Chrome not found at ${CHROME}; set CHROME_PATH`)
   const dir = await mkdtemp(join(tmpdir(), 'fx0-preview-update-'))
   const frames = new Map(), hits = new Map(), held = [], errors = []
@@ -263,14 +172,22 @@ test('in Chrome, the production preview wrapper and React PreviewPane preserve s
   const largeImage = Buffer.alloc(Math.floor(1.1 * 1024 * 1024), 0x41)
   PIXEL.copy(largeImage)
   const paneArtifacts = new Map(), paneLatest = new Map(), paneModes = new Map(), paneRequests = [], paneHeld = [], paneHtmlHeld = [], bundleHeld = [], paneCaptures = []
-  let paneFixture, holdBundle = true
+  let paneFixture, holdBundle = true, artifactDelayMs = 0
   let origin, chrome, cdp, chromeError = '', frameNumber = 0, requestNumber = 0, offRouteHits = 0
   const sendFrame = (response, preview) => {
     const prepared = prepareDesignArtifactHtml(preview.renderHtml, DESIGN_ARTIFACT_EMBEDDED_CSP, TOKEN)
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': designFrameCsp(`${origin}/api/artifact-image`) })
     response.end(designFrameHtml(prepared, TOKEN, preview.images, preview, { relay: DESIGN_CAPTURE_RELAY, script: designCaptureScript }))
   }
-  const server = http.createServer((request, response) => {
+  // Model the frame-error response contract; the real route and its script are covered
+  // independently in route-security.test.mjs, including the nonce and status handshake.
+  const sendFrameError = (response, status) => {
+    const nonce = randomBytes(16).toString('hex')
+    response.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'private, no-store',
+      'content-security-policy': `default-src 'none'; script-src 'nonce-${nonce}'; frame-ancestors 'self'` })
+    response.end(`<!doctype html><script nonce="${nonce}">const report=()=>parent.postMessage({type:'fx0-preview-error',protocol:1,status:${status}},location.origin);addEventListener('message',event=>{if(event.source===parent&&event.origin===location.origin&&event.data?.type==='fx0-preview-status'&&event.data.protocol===1)report()});report()</script>`)
+  }
+  const route = (request, response) => {
     const url = new URL(request.url, 'http://fixture')
     if (url.pathname === '/pane' && paneFixture) return response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(paneFixture.html)
     if (url.pathname === '/bundle.js' && paneFixture) {
@@ -295,13 +212,17 @@ test('in Chrome, the production preview wrapper and React PreviewPane preserve s
       const revision = url.searchParams.has('revision') ? wanted : paneLatest.get(session)
       const preview = paneArtifacts.get(`${session}:${revision}`), json = url.searchParams.get('format') === 'json'
       paneRequests.push({ session, wanted, revision, json })
-      if (!preview) return response.writeHead(404, { 'content-type': 'application/json' }).end('{"error":"No local design"}')
       const mode = paneModes.get(`${session}:${wanted}`)
+      const staleFrame = !json && !url.searchParams.has('revision') && Number.isSafeInteger(wanted) && wanted > 0 && revision < wanted
+      const failure = typeof mode === 'number' ? mode : mode === 'error' ? 503 : !preview || staleFrame ? 404 : null
+      if (failure) {
+        if (!json) return sendFrameError(response, failure)
+        return response.writeHead(failure, { 'content-type': 'application/json', 'cache-control': 'private, no-store' }).end('{"error":"Local failure"}')
+      }
       if (!json) {
         if (mode === 'hold-html') return void paneHtmlHeld.push({ response, preview })
         return sendFrame(response, preview)
       }
-      if (mode === 'error') return response.writeHead(503, { 'content-type': 'application/json' }).end('{"error":"Local failure"}')
       // Only the external snapshot/data source is simulated. JSON never mounts or
       // executes a candidate; the real React effect decides what to do with it.
       const text = JSON.stringify(preview)
@@ -332,6 +253,11 @@ test('in Chrome, the production preview wrapper and React PreviewPane preserve s
     if (url.pathname === '/') return response.writeHead(200, { 'content-type': 'text/html' }).end(PARENT)
     if (url.pathname === '/not-an-image') { offRouteHits++; return response.end('must not be fetched') }
     response.writeHead(204).end()
+  }
+  // Perf-only synthetic latency: the artifact frame's HTML and JSON are delayed; every other route is immediate.
+  const server = http.createServer((request, response) => {
+    if (artifactDelayMs && new URL(request.url, 'http://fixture').pathname === '/api/artifact-frame') setTimeout(route, artifactDelayMs, request, response)
+    else route(request, response)
   })
   try {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
@@ -393,6 +319,110 @@ test('in Chrome, the production preview wrapper and React PreviewPane preserve s
       assert.equal(after.sameNodes, true)
     }
     const noErrors = async () => { assert.deepEqual(errors, []); assert.deepEqual((await observed()).errors, []) }
+
+    // Perf-only (FX0_PREVIEW_PERF=1): first publish and one compatible hot update in the real
+    // PreviewPane, for the baseline compile and the experimental candidate. Every duration is
+    // read from this page's performance.now (or Date.now) clock; the host only waits, never times.
+    // Mock excludes auth, Redis, model providers and generation; the delay is synthetic.
+    if (PERF) {
+      const J = JSON.stringify, fixtures = {}
+      for (const [name, experiment] of [['baseline', LEGACY_BASELINE], ['candidate', null]]) {
+        await mkdir(join(dir, name))
+        fixtures[name] = await buildPaneFixture(join(dir, name), experiment)
+      }
+      holdBundle = false
+      // Fetch the page, bundle and frames on every sample rather than from Chrome's HTTP cache.
+      await cdp.call('Network.enable'); await cdp.call('Network.setCacheDisabled', { cacheDisabled: true })
+      const frontSelector = '#preview-pane iframe[title="Design artifact preview"]:not([aria-hidden="true"])'
+      const frontCount = () => evaluate("document.querySelectorAll('#preview-pane iframe').length")
+      const paneState = () => evaluate(`(() => { const frame = document.querySelector(${J(frontSelector)}); return frame ? observed.reports.filter(s => s.mountUrl === frame.getAttribute('src')).at(-1) ?? null : null })()`)
+      const waitPane = predicate => until(async () => { const current = await paneState(); return current && predicate(current) && current }, 'perf PreviewPane state')
+      const publish = (session, revision, options) => {
+        paneArtifacts.set(`${session}:${revision}`, { ...payload(revision, design(options)), sessionId: session })
+        paneLatest.set(session, revision)
+      }
+      // The seeded session bootstraps real SSR and hydration; each sample then starts a new chat.
+      publish(SESSION, 101, { title: 'Seed design' })
+      const METRICS = ['publishToReadyMs', 'readyToCaptureDoneMs', 'publishToCaptureDoneMs', 'uploadLagMs', 'previewWaitMs', 'libraryMs', 'encodeMs', 'jsonDurationMs', 'htmlDurationMs', 'jsonRequests', 'htmlRequests']
+      // One publish: the prop change, the screenshot request in the same turn, then ready and capture-done times.
+      const phase = async (session, revision, options) => {
+        const cid = `${session}-${revision}`, mark = paneRequests.length
+        publish(session, revision, options)
+        await evaluate(`{ window.frontBefore = document.querySelector(${J(frontSelector)}); window.captureUploads = []; performance.clearResourceTimings(); window.publishAt = performance.now(); setRevision(${revision}); setCapture({ cid: ${J(cid)}, revision: ${revision}, sessionId: ${J(session)}, receivedAt: Date.now() }) }`)
+        // The first paint (no confirmed document) or the applied acknowledgement (hot update), whichever arrives.
+        const ready = await until(() => evaluate(`[...observed.paints, ...observed.results].find(e => e.sessionId === ${J(session)} && e.revision === ${revision} && (e.type === 'fx0-preview-result' ? e.status === 'applied' : e.updateReady === true)) ?? null`), `${cid} ready`, 20_000)
+        const captured = await until(() => evaluate(`captureResults.find(r => r.cid === ${J(cid)}) ?? null`), `${cid} capture done`, 20_000)
+        const page = await evaluate(`({ publishAt: window.publishAt, sameFront: window.frontBefore != null && window.frontBefore === document.querySelector(${J(frontSelector)}), uploads: window.captureUploads.slice(),
+          resources: performance.getEntriesByType('resource').filter(e => e.name.includes('/api/artifact-frame')).map(e => ({ kind: new URL(e.name).searchParams.has('format') ? 'json' : 'html', initiatorType: e.initiatorType, durationMs: e.duration, waitMs: e.responseStart - e.requestStart, transferMs: e.responseEnd - e.responseStart })) })`)
+        const shot = paneCaptures.find(capture => capture.cid === cid)
+        assert.ok(shot, `${cid} reached /api/capture`)
+        assert.equal(shot.failed, null, `${cid} uploaded a photo`)
+        assert.equal(shot.images.length, 1)
+        assert.equal(captured.answered, true)
+        const requests = paneRequests.slice(mark).filter(request => request.session === session), upload = page.uploads.at(-1)
+        const resource = kind => page.resources.find(entry => entry.kind === kind)
+        return {
+          readyEvent: ready.type === 'fx0-preview-result' ? 'applied' : 'paint', documentId: ready.documentId ?? null, sameFront: page.sameFront,
+          publishToReadyMs: ready.observedAt - page.publishAt, readyToCaptureDoneMs: captured.observedAt - ready.observedAt,
+          publishToCaptureDoneMs: captured.observedAt - page.publishAt, uploadLagMs: upload ? upload.headersAt - upload.start : null,
+          previewWaitMs: shot.timing.previewWaitMs, libraryMs: shot.timing.frame?.libraryMs ?? null, encodeMs: shot.timing.frame?.encodeMs ?? null,
+          jsonDurationMs: resource('json')?.durationMs ?? null, htmlDurationMs: resource('html')?.durationMs ?? null,
+          jsonRequests: requests.filter(request => request.json).length, htmlRequests: requests.filter(request => !request.json).length,
+          requestOrder: requests.map(request => (request.json ? 'json' : 'html')), resources: page.resources,
+        }
+      }
+      const sample = async (variant, delay, index) => {
+        const session = `perf-${variant}-${delay}-${index}-${randomBytes(4).toString('hex')}`
+        artifactDelayMs = delay
+        paneFixture = fixtures[variant]
+        await cdp.call('Page.navigate', { url: `${origin}/pane` })
+        await until(() => evaluate('window.fixtureReady === true'), 'perf hydration', 20_000)
+        await until(() => evaluate(`observed.paints.some(p => p.sessionId === ${J(SESSION)} && p.revision === 101 && p.updateReady === true)`), 'perf seeded SSR paint', 20_000)
+        // Shadow the production fetch only to timestamp the capture upload's response headers.
+        await evaluate(`{ window.captureUploads = []; const send = window.fetch; window.fetch = (input, init) => { const url = String(input?.url ?? input); if (!url.includes('/api/capture')) return send(input, init); const start = performance.now(); return send(input, init).then(response => { window.captureUploads.push({ start, headersAt: performance.now() }); return response }) } }`)
+        // A new chat: no frame until its first publish, then a patch that keeps the same confirmed document.
+        await evaluate(`setSession(${J(session)}); setRevision(0)`)
+        await until(async () => await frontCount() === 0, 'perf new chat has no preview frame')
+        const initial = await phase(session, 1, { title: 'Perf first design' })
+        assert.deepEqual(initial.requestOrder, variant === 'baseline' ? ['json', 'html'] : ['html'], `${variant} initial artifact requests`)
+        await interact()
+        const before = await waitPane(s => s.scroll === 900 && s.focused), boots = (await observed()).boots.length
+        const update = await phase(session, 2, { color: 'rgb(90, 80, 70)', title: 'Perf edited title', padding: 12 })
+        preserved(before, await waitPane(s => s.title === 'Perf edited title' && s.color === 'rgb(90, 80, 70)' && s.padding === '12px'))
+        assert.deepEqual(update.requestOrder, ['json'], `${variant} hot update requests JSON only`)
+        assert.equal(update.documentId, initial.documentId, 'the hot update keeps the first document')
+        assert.equal(update.sameFront, true, 'the front frame node is not replaced')
+        assert.equal(await frontCount(), 1)
+        assert.equal((await observed()).boots.length, boots, 'no document reload or script restart')
+        return { variant, artifactDelayMs: delay, index, session, initial, update }
+      }
+      const samples = []
+      for (const delay of [0, 150]) {
+        for (let index = 0; index < 5; index++) {
+          // Alternate the order so drift affects both variants alike.
+          for (const variant of index % 2 ? ['candidate', 'baseline'] : ['baseline', 'candidate']) samples.push(await sample(variant, delay, index))
+        }
+      }
+      artifactDelayMs = 0
+      await noErrors()
+      const cells = {}
+      for (const sample of samples) {
+        const cell = cells[`${sample.variant}@${sample.artifactDelayMs}ms`] ??= { n: 0, initial: {}, update: {} }
+        cell.n++
+        for (const phaseName of ['initial', 'update']) for (const metric of METRICS) (cell[phaseName][metric] ??= []).push(sample[phaseName][metric])
+      }
+      for (const cell of Object.values(cells)) for (const phaseName of ['initial', 'update']) for (const metric of METRICS) cell[phaseName][metric] = median(cell[phaseName][metric])
+      const report = {
+        kind: 'fx0-preview-perf', candidate: { id: 'first-load-html-only', status: 'current production source, local verification', baselineRemoves: LEGACY_BASELINE.from },
+        chrome: (await (await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(8000) })).json()).Browser, node: process.version,
+        synthetic: { artifactFrameDelayMs: [0, 150], delayed: 'HTML and JSON of /api/artifact-frame', notMeasured: ['production auth', 'Redis', 'model provider', 'generation', 'real network'], uploadEndpoint: 'local mock /api/capture without storage' },
+        clocks: 'Browser performance.now for ready and capture boundaries; Date.now for previewWait (same browser clock); upload lag from the browser fetch promise',
+        samples, cells,
+      }
+      if (process.env.FX0_PREVIEW_PERF_OUT) await writeFile(process.env.FX0_PREVIEW_PERF_OUT, JSON.stringify(report, null, 2))
+      console.log(`FX0_PREVIEW_PERF_RESULT ${JSON.stringify(report)}`)
+      return
+    }
 
     // Fail once, rather than running every case against a legacy three-argument wrapper.
     let paint = await mounted(payload(1, design({ photo: true })))
@@ -937,6 +967,7 @@ test('in Chrome, the production preview wrapper and React PreviewPane preserve s
         await evaluate(`setSession(${JSON.stringify(otherSession)}); setRevision(1)`)
         await waitPane(s => s.program === 'other private session' && s.title === 'Other private design')
         await until(async () => await iframeCount() === 1, 'new session replaces the old scope')
+        assert.deepEqual(paneRequests.filter(r => r.session === otherSession && r.wanted === 1).map(r => r.json ? 'json' : 'html'), ['html'], 'a first load goes straight to HTML')
         assert.equal(await evaluate(`new URL(document.querySelector(${JSON.stringify(frontSelector)}).src).searchParams.get('session')`), otherSession)
         // Revocation must remove *all* private layers, not reveal a draft that had
         // been correctly hidden behind the published design or retain its link dialog.
@@ -960,21 +991,21 @@ test('in Chrome, the production preview wrapper and React PreviewPane preserve s
         await until(() => evaluate("!!document.querySelector('iframe[title=\"Design preview while generating\"]')"), 'authorized first-generation draft remains supported')
         await evaluate('setDraft(null)')
 
-        // With no confirmed document, an initial JSON failure is recoverable via
-        // the component's own Retry button, not a test-driven iframe mount.
+        // With no confirmed document, an initial HTML failure is recoverable via
+        // the component's own Retry button, without a JSON preflight.
         publish(2, { program: 'initial retry', title: 'Initial failure recovered' }, otherSession)
         paneModes.set(`${otherSession}:2`, 'error')
         const htmlBeforeInitialError = htmlCount(), bootsBeforeInitialError = (await observed()).boots.length
         await evaluate('setRevision(2)')
         await until(async () => (await status()).includes('could not be loaded'), 'initial acquisition error')
         assert.equal(await iframeCount(), 0)
-        assert.equal(htmlCount(), htmlBeforeInitialError)
+        assert.equal(htmlCount(), htmlBeforeInitialError + 1)
         paneModes.delete(`${otherSession}:2`)
         await evaluate("[...document.querySelectorAll('#preview-pane button')].find(button => button.textContent === 'Retry preview').click()")
         await waitPane(s => s.program === 'initial retry' && s.title === 'Initial failure recovered')
-        assert.equal(htmlCount(), htmlBeforeInitialError + 1)
+        assert.equal(htmlCount(), htmlBeforeInitialError + 2)
         assert.equal((await observed()).boots.length, bootsBeforeInitialError + 1)
-        assert.equal(paneRequests.filter(r => r.session === otherSession && r.wanted === 2 && r.json).length, 2)
+        assert.equal(paneRequests.filter(r => r.session === otherSession && r.wanted === 2 && r.json).length, 0)
         assert.equal(await status(), '')
         await noErrors()
       } catch (error) {
@@ -987,6 +1018,114 @@ test('in Chrome, the production preview wrapper and React PreviewPane preserve s
         for (const response of bundleHeld.splice(0)) response.destroy()
         for (const { response } of paneHeld) response.destroy()
       }
+    })
+
+    for (const firstLoad of ['client', 'pre-hydration SSR']) {
+      for (const code of [401, 403, 404, 422, 503]) {
+        await t.test(`${firstLoad} HTML ${code} reports errors without a JSON preflight`, async () => {
+          paneFixture ??= await buildPaneFixture(dir)
+          const session = firstLoad === 'client' ? `first-load-${code}` : SESSION
+          const revision = firstLoad === 'client' ? 1 : 101
+          const key = `${session}:${revision}`
+          paneArtifacts.set(`${SESSION}:101`, payload(101, design({ program: 'error baseline' })))
+          paneLatest.set(SESSION, 101)
+          paneArtifacts.set(key, payload(revision, design({ program: `recovered ${code}` }), session))
+          paneLatest.set(session, revision)
+          if (firstLoad !== 'client') paneModes.set(key, code)
+          const start = paneRequests.length
+          const countFrames = () => evaluate("document.querySelectorAll('#preview-pane iframe').length")
+          const status = () => evaluate("document.querySelector('#preview-pane [role=status]')?.textContent ?? ''")
+          try {
+            holdBundle = firstLoad !== 'client'
+            await cdp.call('Page.navigate', { url: `${origin}/pane` })
+            if (holdBundle) {
+              await until(async () => (await observed()).frameErrors.some(error => error.status === code), 'SSR error arrived before hydration')
+              assert.equal(await evaluate('window.fixtureReady === true'), false)
+              holdBundle = false
+              for (const response of bundleHeld.splice(0)) response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' }).end(paneFixture.bundle)
+            }
+            await until(() => evaluate('window.fixtureReady === true'), 'error fixture hydration')
+            if (firstLoad === 'client') {
+              await until(async () => (await observed()).paints.some(paint => paint.revision === 101), 'healthy bootstrap before a new scope')
+              paneModes.set(key, code)
+              await evaluate(`setSession(${JSON.stringify(session)}); setRevision(${revision})`)
+            }
+            if (code === 401 || code === 403) {
+              await until(() => evaluate(`window.authErrors.includes(${code})`), 'frame error closes the shared auth gate')
+              assert.deepEqual(await evaluate('window.authErrors'), [code], 'status replies cannot dispatch duplicate auth errors')
+            } else {
+              await until(async () => (await status()).includes(code === 404 ? 'not available' : 'could not be loaded'), 'frame error is immediately retryable')
+            }
+            await until(async () => await countFrames() === 0, 'failed and revoked private frames are removed')
+            const requests = () => paneRequests.slice(start).filter(request => request.session === session && request.wanted === revision)
+            assert.deepEqual(requests().map(request => request.json ? 'json' : 'html'), ['html'])
+            if (code === 401 || code === 403) {
+              await sleep(50)
+              assert.equal(await countFrames(), 0, 'late frame replies do not revive revoked access')
+              assert.equal(requests().length, 1)
+            } else {
+              paneModes.delete(key)
+              await evaluate("[...document.querySelectorAll('#preview-pane button')].find(button => button.textContent === 'Retry preview').click()")
+              await until(async () => (await observed()).boots.some(boot => boot.program === `recovered ${code}`), 'Retry loads the corrected response')
+              await until(async () => await countFrames() === 1 && await status() === '', 'Retry confirms one healthy frame')
+              assert.deepEqual(requests().map(request => request.json ? 'json' : 'html'), ['html', 'html'])
+            }
+            await noErrors()
+          } finally {
+            paneModes.delete(key)
+            holdBundle = false
+            for (const response of bundleHeld.splice(0)) response.destroy()
+          }
+        })
+      }
+    }
+
+    await t.test('a closed client auth gate blocks the first HTML request even when access props are stale', async () => {
+      paneFixture ??= await buildPaneFixture(dir)
+      paneArtifacts.set(`${SESSION}:101`, payload(101, design({ program: 'auth gate baseline' })))
+      paneLatest.set(SESSION, 101)
+      const session = 'auth-gate-must-not-load'
+      paneArtifacts.set(`${session}:1`, payload(1, design({ program: 'must not bypass client auth gate' }), session))
+      paneLatest.set(session, 1) // The external backend would return 200 if incorrectly requested.
+      await cdp.call('Page.navigate', { url: `${origin}/pane` })
+      await until(() => evaluate('window.fixtureReady === true'), 'closed-gate fixture hydration')
+      await until(async () => (await observed()).paints.some(paint => paint.revision === 101), 'closed-gate fixture bootstrap')
+      await evaluate('closeAuthGate(401)')
+      await until(() => evaluate("document.querySelectorAll('#preview-pane iframe').length === 0"), 'auth revocation clears the old frame')
+      const start = paneRequests.length
+      await evaluate(`setSession(${JSON.stringify(session)}); setRevision(1); setAccessAllowed(true)`)
+      await until(() => evaluate("document.querySelector('#preview-pane [role=status]')?.textContent.includes('session has expired')"), 'the independent auth gate still blocks navigation')
+      assert.equal(paneRequests.length, start, 'neither HTML nor JSON can leave the closed gate')
+      assert.equal(await evaluate("document.querySelectorAll('#preview-pane iframe').length"), 0)
+      assert.deepEqual(await evaluate('window.authErrors'), [401])
+      assert.equal((await observed()).boots.some(boot => boot.program === 'must not bypass client auth gate'), false)
+      await noErrors()
+    })
+
+    await t.test('a stale first HTML load never runs the old design and Retry fetches the requested version', async () => {
+      paneFixture ??= await buildPaneFixture(dir)
+      const session = 'stale-first-load'
+      paneArtifacts.set(`${SESSION}:101`, payload(101, design({ program: 'stale test baseline' })))
+      paneLatest.set(SESSION, 101)
+      paneArtifacts.set(`${session}:1`, payload(1, design({ program: 'must never run stale design' }), session))
+      paneLatest.set(session, 1)
+      await cdp.call('Page.navigate', { url: `${origin}/pane` })
+      await until(() => evaluate('window.fixtureReady === true'), 'stale fixture hydration')
+      await until(async () => (await observed()).paints.some(paint => paint.revision === 101), 'stale fixture bootstrap')
+      const start = paneRequests.length
+      await evaluate(`setSession(${JSON.stringify(session)}); setRevision(2)`)
+      const status = () => evaluate("document.querySelector('#preview-pane [role=status]')?.textContent ?? ''")
+      await until(async () => (await status()).includes('not available'), 'a stale source fails without waiting for the paint deadline')
+      assert.equal((await observed()).boots.some(boot => boot.program === 'must never run stale design'), false)
+      assert.deepEqual(paneRequests.slice(start).map(request => request.json ? 'json' : 'html'), ['html'])
+      paneArtifacts.set(`${session}:2`, payload(2, design({ program: 'requested fresh design' }), session))
+      paneLatest.set(session, 2)
+      await evaluate("[...document.querySelectorAll('#preview-pane button')].find(button => button.textContent === 'Retry preview').click()")
+      await until(async () => (await observed()).paints.some(paint => paint.revision === 2), 'fresh revision paints after Retry')
+      assert.equal((await observed()).boots.some(boot => boot.program === 'requested fresh design'), true)
+      assert.deepEqual(paneRequests.slice(start).map(request => request.json ? 'json' : 'html'), ['html', 'html'])
+      assert.equal(await status(), '')
+      await noErrors()
     })
 
     await t.test('a loaded replacement survives background time while a genuinely visible load still has a deadline', async () => {
@@ -1086,7 +1225,7 @@ test('first publish waits for wrapper load after child paint', { timeout: 60_000
   const errors = []
   const held = []
   let chrome, cdp, chromeError = ''
-  const fixture = await buildPaneFixture(dir, 0)
+  const fixture = await buildPaneFixture(dir, null, { initialRevision: 0 })
   const house = await readFile(new URL('./fixtures/simple-house.html', import.meta.url), 'utf8')
   const candidate = payload(1, house)
   const server = http.createServer((request, response) => {

@@ -1,6 +1,11 @@
 export const PREVIEW_PROTOCOL = 1
 export const PREVIEW_PREPARE_MS = 10_000
 
+// The HTTP status a failed preview frame reports (app/api/artifact-frame/route.ts).
+export function isPreviewErrorStatus(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 400 && value <= 599
+}
+
 export interface PreviewPayload {
   protocol: 1
   sessionId: string

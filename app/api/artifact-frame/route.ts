@@ -10,7 +10,7 @@ import { log } from '../../../lib/session'
 
 export const maxDuration = 30
 
-export const GET = withSessionRoute(async (request, { id: sessionId, user }) => {
+const serveFrame = withSessionRoute(async (request, { id: sessionId, user }) => {
   // Without a revision this is the live design in Redis; with one, a past version from Neon.
   const params = new URL(request.url).searchParams
   const format = params.get('format')
@@ -26,6 +26,14 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
   // keep this response but must revalidate it: this route checks the session first,
   // so a reload costs a 304 and a signed-out browser gets nothing from its cache.
   const version = Number(params.get('v'))
+  // A frame that asks for a newer revision than the live one is a raced or stale load. It
+  // fails here, before any design is prepared, so the parent retries instead of booting
+  // the old design (components/preview-pane.tsx). Current or newer revisions are served.
+  if (!json && !past && request.headers.get('sec-fetch-dest') === 'iframe' && Number.isSafeInteger(version) && version > 0 && actualRevision < version) {
+    return Response.json({ error: 'The requested design version is not available yet. Try again.' }, {
+      status: 404, headers: { 'cache-control': 'private, no-store' },
+    })
+  }
   const cacheable = live?.html != null && Number.isSafeInteger(version) && version > 0 && version === live.revision
   const etag = cacheable ? `"${sessionId}:${live.revision}"` : null
   if (!json && etag && request.headers.get('if-none-match') === etag) {
@@ -61,7 +69,7 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
   // Every preview is photographed where it is (lib/design-capture.ts): the wrapper gives each child document its own capture runtime.
   const html = designFrameHtml(preparedArtifact, readyToken, images, payload ?? undefined, { relay: DESIGN_CAPTURE_RELAY, script: designCaptureScript })
   return new Response(html, {
-    status: artifact == null ? 404 : 200,
+    status: artifact == null ? 404 : prepared == null ? 422 : 200,
     headers: {
       'cache-control': etag ? 'private, no-cache' : 'private, no-store',
       ...(etag ? { etag } : {}),
@@ -74,3 +82,29 @@ export const GET = withSessionRoute(async (request, { id: sessionId, user }) => 
     },
   })
 })
+
+export async function GET(request: Request): Promise<Response> {
+  return reportFrameError(request, await serveFrame(request))
+}
+
+// A frame cannot read a JSON error, so a failed document reports its status to the
+// preview that loaded it (components/preview-pane.tsx). Programmatic callers keep JSON.
+function reportFrameError(request: Request, response: Response): Response {
+  if (response.status < 400 || request.headers.get('sec-fetch-dest') !== 'iframe'
+    || new URL(request.url).searchParams.get('format') === 'json') return response
+  // The status is the only value in the script; the body never carries session or user data.
+  const nonce = crypto.randomUUID().replaceAll('-', '')
+  const headers = new Headers(response.headers)
+  headers.delete('content-length')
+  headers.set('cache-control', 'private, no-store')
+  headers.set('content-type', 'text/html; charset=utf-8')
+  headers.set('content-security-policy', `default-src 'none'; script-src 'nonce-${nonce}'; frame-ancestors 'self'`)
+  headers.set('referrer-policy', 'no-referrer')
+  headers.set('x-content-type-options', 'nosniff')
+  // The parent asks for the status on mount. A frame can finish loading before that listener exists, so it also posts once on its own.
+  const script = `const report=()=>parent.postMessage({type:'fx0-preview-error',protocol:${PREVIEW_PROTOCOL},status:${response.status}},location.origin);`
+    + `addEventListener('message',event=>{if(event.source===parent&&event.origin===location.origin&&event.data&&event.data.type==='fx0-preview-status'&&event.data.protocol===${PREVIEW_PROTOCOL})report()});report()`
+  return new Response(`<!doctype html><meta charset="utf-8"><title>Design preview unavailable</title><script nonce="${nonce}">${script}</script>`, {
+    status: response.status, statusText: response.statusText, headers,
+  })
+}

@@ -5,8 +5,8 @@ import { designLinkUrl } from '../lib/design-link'
 import { EMPTY_DRAFT_DOCUMENT, patchDraftDocument } from '../lib/draft-preview'
 import { CAPTURE_PAINT_MS, CAPTURE_PREVIEW_START_MS, type CaptureFailure } from '../lib/capture-protocol'
 import { captureFrame, reportCaptureFailure, sendCapture, type CaptureRequest } from './design-capture'
-import { PREVIEW_PREPARE_MS, PREVIEW_PROTOCOL, type PreviewPayload } from '../lib/preview-update'
-import { AuthRouteError, fetchUi } from './auth-ui'
+import { isPreviewErrorStatus, PREVIEW_PREPARE_MS, PREVIEW_PROTOCOL, type PreviewPayload } from '../lib/preview-update'
+import { AuthRouteError, fetchUi, signalAuthRequired, uiAuthError } from './auth-ui'
 import DesignLinkDialog from './design-link-dialog'
 import { HowItWorksPanel } from './how-it-works'
 
@@ -192,6 +192,12 @@ export default function PreviewPane({
     }
     if (loading != null) watchLoad(loading)
     const loadFull = (revision: number) => {
+      // A document load does not pass through fetchUi, so it honors the same closed gate here.
+      const blocked = uiAuthError()
+      if (blocked) {
+        fail(blocked.message)
+        return
+      }
       const index = front == null ? 0 : 1 - front
       // Never reuse a URL as evidence of document identity, including after a hot
       // patch. A distinct mount URL also rejects queued messages from the old page
@@ -208,6 +214,11 @@ export default function PreviewPane({
     const pump = async () => {
       if (!active() || !desired || error || attempt || loading != null || capturingScope.current === scope) return
       const shown = front == null ? null : slots[front]
+      // Nothing is on screen yet, so the document itself is the first paint: no JSON round trip.
+      if (!shown) {
+        loadFull(desired)
+        return
+      }
       // A legacy wrapper can confirm a full load, but cannot advertise hot updates.
       if (shown && (shown.appliedRevision ?? shown.requestedRevision) >= desired) return
       const next: PreviewAttempt = {
@@ -334,6 +345,15 @@ export default function PreviewPane({
         const url = designLinkUrl(data.url)
         if (index !== front || !url || Date.now() < linksPausedUntil.current) return
         setLinkRequest((current) => current ?? { scope, url })
+        return
+      }
+      if (data.type === 'fx0-preview-error') {
+        // Only the frame being loaded can fail the preview; a shown design keeps its place.
+        if (index !== loading || data.protocol !== PREVIEW_PROTOCOL || !isPreviewErrorStatus(data.status)) return
+        clearLoading()
+        fail(data.status === 401 || data.status === 403 ? signalAuthRequired(data.status).message
+          : data.status === 404 ? 'This design is not available. Try again.'
+            : 'The design could not be loaded. Try again.')
         return
       }
       if (data.type === 'fx0-preview-result') {
