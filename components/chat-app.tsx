@@ -558,7 +558,8 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
       setPreviewChosen(isPreviewOpenFromSearch(window.location.search))
       if (next.kind === 'chat') {
         if (next.id !== activeSession.current) void switchSessionRef.current(next.id, false)
-      } else if (next.kind === 'invalid' || activeSession.current !== 'draft') {
+      // A chat still opening already shows an empty view, so it counts as not on a draft.
+      } else if (next.kind === 'invalid' || activeSession.current !== 'draft' || switchTarget.current) {
         returnToDraftRef.current(next.kind === 'invalid')
       }
     }

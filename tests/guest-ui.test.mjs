@@ -430,6 +430,31 @@ test('New design while a chat opens wins over the late snapshot', async (t) => {
   assert.doesNotMatch(window.location.search, /[?&]s=/, 'the URL stays on the new design')
 })
 
+test('Back to the new-chat page while a chat opens wins over the late snapshot', async (t) => {
+  const summary = (id) => ({ id, title: id, createdAt: 1, lastActivity: 1, busy: false })
+  let releaseSlow
+  const slow = new Promise((resolve) => { releaseSlow = resolve })
+  const ui = browser(t, {
+    '/api/session?session=slow': () => slow.then(() => Response.json({ transcript: compactTranscript([{ type: 'user', seq: 1, id: 1, text: 'Design slow' }], guestBoot.view), summary: summary('slow') })),
+  })
+  const app = mount(t, ui, { ...guestBoot, user: { id: 'user-1', name: 'User', email: null, picture: null }, sessionId: 'draft', sessions: [summary('slow')] })
+  await tick()
+  app.render()
+  const rail = () => find(app.tree(), (node) => node.type === Sidebar).props
+  const entries = () => find(app.tree(), (node) => node.type === Transcript).props.entries
+  rail().onSelect('slow')
+  app.render()
+  assert.equal(rail().activeId, 'slow')
+  navigate('')
+  app.render()
+  releaseSlow()
+  await tick()
+  await tick()
+  app.render()
+  assert.deepEqual(entries(), [], 'the late snapshot does not replace the new chat')
+  assert.equal(rail().activeId, 'draft')
+})
+
 test('once idle, the three most recent other chats load in the background and then open from the cache', async (t) => {
   const summary = (id, at) => ({ id, title: id, createdAt: 1, lastActivity: at, busy: false })
   const snapshot = (id) => Response.json({ transcript: compactTranscript([{ type: 'user', seq: 1, id: 1, text: `Design ${id}` }], guestBoot.view), summary: summary(id, 1) })
