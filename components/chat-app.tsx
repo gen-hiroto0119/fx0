@@ -405,6 +405,9 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
   const [startedTurns, setStartedTurns] = useState<Set<number>>(initialState.startedTurns)
   const [streamStartSeq, setStreamStartSeq] = useState(initialState.lastSeq)
   const [switchingTo, setSwitchingTo] = useState<string | null>(null)
+  // While an uncached chat opens: its latest design revision from the history list, so
+  // the preview starts loading alongside the transcript instead of after it.
+  const [switchPreview, setSwitchPreview] = useState<{ sessionId: string; revision: number } | null>(null)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   // The session rail drags through SidebarGestures; this tracks the conversation pane.
   const [agentResizing, setAgentResizing] = useState(false)
@@ -953,32 +956,52 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     if (hasIdentity && !authBlocked && id !== 'draft' && id !== sessionId) void loadSession(id).catch(() => {})
   }
 
+  // The chat the latest switch is moving to; a later click replaces it, and an earlier
+  // load that finishes afterwards is dropped.
+  const switchTarget = useRef<string | null>(null)
   async function switchSession(id: string, pushHistory = true) {
     focusPrompt()
-    if (!hasIdentity || authBlocked || id === 'draft' || id === activeSession.current || switchingTo) return
+    if (!hasIdentity || authBlocked || id === 'draft' || id === activeSession.current || id === switchTarget.current) return
     if (!chatReady) bootAbandoned.current = true
     pendingSend.current = false
-    const cached = eventCache.current.get(id)
-    if (!cached) setSwitchingTo(id)
     setInteractionNotice(null)
+    // Move to the chat at once: its URL now, and, until its snapshot arrives, the empty
+    // chat a chat URL shows while loading (html.chat-url skeletons).
+    if (pushHistory) {
+      const url = new URL(window.location.href)
+      url.searchParams.set('s', id)
+      window.history.pushState(null, '', url)
+    }
+    const cached = eventCache.current.get(id)
+    switchTarget.current = id
+    const listedRevision = sessions.find((session) => session.id === id)?.artifactRevision
+    setSwitchPreview(!cached && listedRevision ? { sessionId: id, revision: listedRevision } : null)
+    if (!cached) {
+      document.documentElement.classList.add('chat-url')
+      clearChatView()
+      setSwitchingTo(id)
+    }
     try {
       const snapshot = cached ?? (await loadSession(id))
-      if (signedOut.current) return
+      if (signedOut.current || switchTarget.current !== id) return
       showSession(id, snapshot)
       setChatReady(true)
-      if (pushHistory) {
-        const url = new URL(window.location.href)
-        url.searchParams.set('s', id)
-        window.history.pushState(null, '', url)
-      }
       setInteractionNotice({ tone: 'status', text: 'Session loaded.' })
     } catch (error) {
+      if (switchTarget.current !== id) return
+      document.documentElement.classList.remove('chat-url')
       if (error instanceof AuthRouteError) return
       console.error('[fx0] session load failed', { sessionId: id, error })
+      // The URL already names the chat; back to a new chat, keeping what was typed.
+      resetLocalDraft(false, { keepTyping: true })
       setInteractionNotice({ tone: 'error', text: 'Unable to load that session. Try again.' })
       if (!chatReady) setChatReady(true)
     } finally {
-      setSwitchingTo(null)
+      if (switchTarget.current === id) {
+        switchTarget.current = null
+        setSwitchingTo(null)
+        setSwitchPreview(null)
+      }
     }
   }
 
@@ -1096,6 +1119,16 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
       composerRef.current?.clearDraft()
       try { clearGuestDraft(window.sessionStorage) } catch { /* Storage is optional. */ }
     }
+    clearChatView()
+    const url = new URL(window.location.href)
+    url.searchParams.delete('s')
+    if (pushHistory) window.history.pushState(null, '', url)
+    else window.history.replaceState(null, '', url)
+  }
+
+  // An empty chat: no entries, turn, design or stream state. The composer and the URL
+  // are the caller's.
+  function clearChatView() {
     setEntries([])
     setArtifactRevision(0)
     setActiveTurnId(null)
@@ -1119,10 +1152,6 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     setStartedTurns(new Set())
     setStreamStartSeq(0)
     setInteractionNotice(null)
-    const url = new URL(window.location.href)
-    url.searchParams.delete('s')
-    if (pushHistory) window.history.pushState(null, '', url)
-    else window.history.replaceState(null, '', url)
   }
 
   // Typing in a draft is a strong signal a prompt follows, so its chat is reserved
@@ -1149,7 +1178,9 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
 
   function onComposerInput(text: string) {
     if (!text.trim() || !isAuthenticated || !authAllowed.current) return
-    if (activeSession.current === 'draft') reserveDraftChat()
+    // While a chat is opening, typing belongs to that chat, not to a new draft.
+    if (switchTarget.current) warmChat(switchTarget.current)
+    else if (activeSession.current === 'draft') reserveDraftChat()
     else warmChat(activeSession.current)
   }
 
@@ -1733,7 +1764,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
           <Sidebar
             sessions={view.sessions}
             loading={loading}
-            activeId={sessionId}
+            activeId={switchingTo ?? sessionId}
             loadingId={switchingTo}
             now={view.now ?? clock}
             onPrefetch={prefetchSession}
@@ -2102,7 +2133,11 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
             </div>
             {region((view) => (
               <PreviewPane
-                source={{ kind: 'design', sessionId: view.sessionId, revision: view.snapshot.transcript.view.artifactRevision }}
+                source={switchPreview && view.sessionId === 'draft'
+                  // The opening chat's listed revision; its snapshot later names the same
+                  // source, so the frame keeps loading instead of starting over.
+                  ? { kind: 'design', ...switchPreview }
+                  : { kind: 'design', sessionId: view.sessionId, revision: view.snapshot.transcript.view.artifactRevision }}
                 viewing={viewing}
                 draft={designDraft?.html ?? null}
                 accessAllowed={!authBlocked && signOutStatus == null}
