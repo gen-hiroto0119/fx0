@@ -1043,7 +1043,12 @@ test('model catalog is public, credential-free, shared, and never reports an aut
     return calls.length === 1
       ? Response.json({ data: [
         { id: 'anthropic/fast', type: 'language', tags: ['fast'], reasoning_options: [{ type: 'effort', values: ['low', 'high'] }] },
-        { id: 'openai/image', type: 'image' },
+        { id: 'openai/image', type: 'image', released: 900 },
+        { id: 'deepseek/older', type: 'language', released: 100 },
+        { id: 'deepseek/newest', type: 'language', released: 300 },
+        { id: 'deepseek/newer', type: 'language', released: 200 },
+        { id: 'deepseek/newest', type: 'language', released: 300 },
+        { id: 'zai/undated', type: 'language' },
       ] })
       : new Response(null, { status: 401 })
   })
@@ -1052,7 +1057,10 @@ test('model catalog is public, credential-free, shared, and never reports an aut
   // Shared by everyone, so the CDN may serve it.
   assert.equal(first.headers.get('cache-control'), 'public, max-age=0, s-maxage=300, stale-while-revalidate=86400')
   const { defaultModel, ...catalog } = await first.json()
-  assert.deepEqual(catalog, { models: ['anthropic/fast'], efforts: { 'anthropic/fast': ['low', 'high'] }, fast: ['anthropic/fast'], featured: [] })
+  assert.deepEqual(catalog, {
+    models: ['deepseek/newest', 'deepseek/newer', 'deepseek/older', 'anthropic/fast', 'zai/undated'],
+    efforts: { 'anthropic/fast': ['low', 'high'] }, fast: ['anthropic/fast'], featured: [],
+  }, 'models are newest first, deduplicated, with undated entries last and image models excluded')
   assert.equal(typeof defaultModel, 'string')
   assert.equal(calls[0].url, 'https://ai-gateway.vercel.sh/coding-agent/v1/models')
   assert.equal(calls[0].headers.get('authorization'), null)
