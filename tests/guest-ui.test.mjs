@@ -1109,6 +1109,48 @@ test('the model picker opens on the selected model, then the featured ones, then
   assert.deepEqual(rows.filter((name) => String(name).endsWith('-model')), ['default-model', 'z-model', 'a-model'])
 })
 
+for (const input of ['pointer', 'keyboard']) {
+  test(`selecting a model closes the picker immediately (${input})`, async (t) => {
+    let releaseSave
+    const saved = new Promise((resolve) => { releaseSave = resolve })
+    const ui = browser(t, {
+      '/api/model?session=chat-1': (init) => saved.then(() => Response.json(JSON.parse(init.body))),
+    })
+    const view = composerAt(ui, 'chat-1', {
+      model: 'a-model', defaultModel: 'default-model', effort: '', fast: false,
+      stored: { model: 'a-model', effort: '', fast: false },
+    })
+    await tick()
+    const picker = (tree) => find(tree, (node) => typeof node.props?.onOpenChange === 'function' && 'open' in node.props)
+    picker(view.render()).props.onOpenChange(true)
+    const tree = view.render()
+    assert.equal(picker(tree).props.open, true)
+    const row = find(tree, (node) => node.props?.role === 'option' && node.props.children?.[0]?.props?.children === 'z-model')
+    if (input === 'pointer') row.props.onPointerDown({ button: 0 })
+    else row.props.onClick({ detail: 0 })
+    const after = view.render()
+    assert.equal(picker(after).props.open, false, 'close without waiting for the settings request')
+    assert.equal(view.ref.current.getGeneration().model, 'z-model')
+    releaseSave()
+    await tick()
+    await tick()
+    view.render()
+    const writes = ui.requests.filter(({ url, init }) => url === '/api/model?session=chat-1' && init?.method === 'POST')
+    assert.equal(writes.length, 1)
+    assert.equal(JSON.parse(writes[0].init.body).model, 'z-model')
+  })
+}
+
+test('model search preserves catalog recency order for equally matching names', async (t) => {
+  const ui = browser(t)
+  const view = composerAt(ui, 'draft', { model: '', defaultModel: 'default-model', effort: '', fast: false })
+  await tick()
+  find(view.render(), (node) => node.props?.id === 'model-search').props.onChange({ target: { value: 'model' } })
+  const rows = []
+  find(view.render(), (node) => { if (node.props?.role === 'option') rows.push(node.props.children?.[0]?.props?.children); return false })
+  assert.deepEqual(rows, ['a-model', 'default-model', 'z-model'], 'equally ranked matches keep the API order, not the featured order')
+})
+
 test('a reloaded chat uses the settings the page rendered, and asks only for later chats', async (t) => {
   const ui = browser(t, { '/api/model?session=chat-2': () => Response.json({ model: 'z-model', effort: '', fast: false }) })
   const stored = { model: 'a-model', effort: 'high', fast: true }

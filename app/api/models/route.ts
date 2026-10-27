@@ -44,13 +44,16 @@ export async function GET() {
     const entries: { id: string; released?: number }[] = []
     for (const model of payload.data ?? []) {
       if (typeof model.id !== 'string' || (typeof model.type === 'string' && model.type.toLowerCase() !== 'language')) continue
-      catalog.models.push(model.id)
-      entries.push({ id: model.id, released: typeof model.released === 'number' ? model.released : undefined })
+      entries.push({ id: model.id, released: typeof model.released === 'number' && Number.isFinite(model.released) ? model.released : undefined })
       const values = model.reasoning_options?.find((option) => option.type === 'effort')?.values
       if (values?.length) catalog.efforts[model.id] = values
       if (model.tags?.includes('fast')) catalog.fast.push(model.id)
     }
-    catalog.models = [...new Set(catalog.models)].sort()
+    // Search preserves this order among equally relevant matches: newest releases first.
+    // Models without release metadata follow dated ones; ties are deterministic.
+    catalog.models = [...new Set(entries
+      .sort((a, b) => (b.released ?? 0) - (a.released ?? 0) || a.id.localeCompare(b.id))
+      .map(({ id }) => id))]
     catalog.fast = [...new Set(catalog.fast)]
     catalog.featured = featuredModels(entries)
     cache = { at: Date.now(), catalog }
