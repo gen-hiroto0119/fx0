@@ -347,7 +347,7 @@ export const readTranscript = createTranscriptReader({
       events: tail.map((item) => parseJson<StreamItem>(item)),
       view,
       summary: stored ? { id, title: stored.title, createdAt: stored.createdAt, lastActivity: stored.lastActivity, busy: busy > 0, ...(stored.trialChat ? { trialChat: true as const } : {}),
-        ...(view.artifactRevision > 0 ? { artifactRevision: view.artifactRevision } : {}) } : null,
+        ...(Number.isSafeInteger(view.artifactRevision) && view.artifactRevision > 0 ? { artifactRevision: view.artifactRevision } : {}) } : null,
     }
   },
   publish: publishTranscriptSnapshot,

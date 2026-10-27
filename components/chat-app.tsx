@@ -1012,6 +1012,8 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     } catch (error) {
       if (switchTarget.current !== id) return
       document.documentElement.classList.remove('chat-url')
+      // An expired sign-in hands over to the auth flow. The URL keeps naming the chat so
+      // signing in again opens it.
       if (error instanceof AuthRouteError) return
       console.error('[fx0] session load failed', { sessionId: id, error })
       // The URL already names the chat; back to a new chat, keeping what was typed.
@@ -1137,6 +1139,10 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
   }, [booting])
 
   function resetLocalDraft(pushHistory = false, { keepTyping = false } = {}) {
+    // A new chat replaces any chat still opening; its snapshot is dropped when it arrives.
+    switchTarget.current = null
+    setSwitchingTo(null)
+    setSwitchPreview(null)
     if (!keepTyping) {
       composerRef.current?.clearDraft()
       try { clearGuestDraft(window.sessionStorage) } catch { /* Storage is optional. */ }

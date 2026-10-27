@@ -397,6 +397,39 @@ test('opening an uncached chat moves to its URL and an empty chat at once; a lat
   assert.ok(find(app.tree(), (node) => node.props?.role === 'alert' && node.props.children === 'Unable to load that session. Try again.'))
 })
 
+test('New design while a chat opens wins over the late snapshot', async (t) => {
+  const summary = (id) => ({ id, title: id, createdAt: 1, lastActivity: 1, busy: false })
+  let releaseSlow
+  const slow = new Promise((resolve) => { releaseSlow = resolve })
+  const ui = browser(t, {
+    '/api/events?session=one&after=1': () => new Response(''),
+    '/api/model?session=one': () => Response.json({ model: '', effort: '', fast: false }),
+    '/api/session?session=slow': () => slow.then(() => Response.json({ transcript: compactTranscript([{ type: 'user', seq: 1, id: 1, text: 'Design slow' }], guestBoot.view), summary: summary('slow') })),
+  })
+  window.history.pushState = (_state, _title, url) => { window.location.search = new URL(String(url)).search }
+  window.history.replaceState = (_state, _title, url) => { window.location.search = new URL(String(url)).search }
+  const app = mount(t, ui, {
+    ...guestBoot, user: { id: 'user-1', name: 'User', email: null, picture: null },
+    sessionId: 'one', sessions: [summary('one'), summary('slow')],
+    events: [{ type: 'user', seq: 1, id: 1, text: 'Design one' }],
+  })
+  await tick()
+  app.render()
+  const rail = () => find(app.tree(), (node) => node.type === Sidebar).props
+  const entries = () => find(app.tree(), (node) => node.type === Transcript).props.entries
+  rail().onSelect('slow')
+  app.render()
+  rail().onNew()
+  app.render()
+  releaseSlow()
+  await tick()
+  await tick()
+  app.render()
+  assert.deepEqual(entries(), [], 'the late snapshot does not replace the new design')
+  assert.equal(rail().activeId, 'draft')
+  assert.doesNotMatch(window.location.search, /[?&]s=/, 'the URL stays on the new design')
+})
+
 test('once idle, the three most recent other chats load in the background and then open from the cache', async (t) => {
   const summary = (id, at) => ({ id, title: id, createdAt: 1, lastActivity: at, busy: false })
   const snapshot = (id) => Response.json({ transcript: compactTranscript([{ type: 'user', seq: 1, id: 1, text: `Design ${id}` }], guestBoot.view), summary: summary(id, 1) })
