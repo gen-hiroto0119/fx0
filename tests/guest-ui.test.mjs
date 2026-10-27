@@ -455,6 +455,62 @@ test('Back to the new-chat page while a chat opens wins over the late snapshot',
   assert.equal(rail().activeId, 'draft')
 })
 
+for (const hasOtherChat of [true, false]) {
+  test(`deleting a chat while it opens drops its late snapshot (${hasOtherChat ? 'another chat remains' : 'last chat'})`, async (t) => {
+    const summary = (id) => ({ id, title: id, createdAt: 1, lastActivity: 1, busy: false })
+    let releaseSlow
+    const slow = new Promise((resolve) => { releaseSlow = resolve })
+    let reads = 0
+    const ui = browser(t, {
+      '/api/events?session=one&after=1': () => new Response(''),
+      '/api/events?session=slow&after=1': () => new Response(''),
+      '/api/model?session=one': () => Response.json({ model: '', effort: '', fast: false }),
+      '/api/model?session=slow': () => Response.json({ model: '', effort: '', fast: false }),
+      '/api/session?session=slow': (init) => {
+        if (init?.method === 'DELETE') return new Response('')
+        reads++
+        if (reads > 1) return new Response('Not found', { status: 404 })
+        return slow.then(() => Response.json({
+          transcript: compactTranscript([{ type: 'user', seq: 1, id: 1, text: 'Deleted chat content' }], guestBoot.view),
+          summary: summary('slow'),
+        }))
+      },
+    })
+    t.mock.method(console, 'error', () => {})
+    const app = mount(t, ui, {
+      ...guestBoot, user: { id: 'user-1', name: 'User', email: null, picture: null },
+      sessionId: hasOtherChat ? 'one' : 'draft',
+      sessions: hasOtherChat ? [summary('one'), summary('slow')] : [summary('slow')],
+      events: hasOtherChat ? [{ type: 'user', seq: 1, id: 1, text: 'Design one' }] : [],
+    })
+    await tick()
+    app.render()
+    const rail = () => find(app.tree(), (node) => node.type === Sidebar).props
+    rail().onSelect('slow')
+    app.render()
+    rail().onDelete('slow')
+    await tick()
+    app.render()
+    assert.ok(ui.requests.some(({ url, init }) => url === '/api/session?session=slow' && init?.method === 'DELETE'))
+    assert.ok(!rail().sessions.some((session) => session.id === 'slow'))
+    releaseSlow()
+    await tick()
+    await tick()
+    app.render()
+    assert.equal(rail().activeId, hasOtherChat ? 'one' : 'draft', 'the late snapshot cannot reopen the deleted chat')
+    assert.equal(rail().loadingId, null)
+    assert.notEqual(find(app.tree(), (node) => node.type === PreviewPane)?.props.source.sessionId, 'slow')
+
+    // Back/Forward to the deleted chat must ask the server, not reuse its late snapshot.
+    navigate('?s=slow')
+    await tick()
+    await tick()
+    app.render()
+    assert.equal(reads, 2, 'the deleted chat was not put back in the cache')
+    assert.equal(rail().activeId, 'draft')
+  })
+}
+
 test('once idle, the three most recent other chats load in the background and then open from the cache', async (t) => {
   const summary = (id, at) => ({ id, title: id, createdAt: 1, lastActivity: at, busy: false })
   const snapshot = (id) => Response.json({ transcript: compactTranscript([{ type: 'user', seq: 1, id: 1, text: `Design ${id}` }], guestBoot.view), summary: summary(id, 1) })

@@ -916,7 +916,7 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
   }
 
   function cacheSession(id: string, snapshot: SessionSnapshot) {
-    if (signedOut.current) return
+    if (signedOut.current || deletingSessions.current.has(id)) return
     eventCache.current.delete(id)
     eventCache.current.set(id, snapshot)
     while (eventCache.current.size > 5) {
@@ -1247,10 +1247,10 @@ export default function ChatApp({ account, sidebar, boot, preference, defaultMod
     const remaining = sessions.filter((session) => session.id !== id)
     deletingSessions.current.add(id)
     setSessions(remaining)
-    // While the page boots, the open chat is the one its URL is still loading;
-    // leaving it abandons that load so it cannot reopen the deleted chat.
+    // A pending selection already owns the view, even while its transcript is empty.
+    // Leaving it invalidates the load so a late response cannot reopen the deleted chat.
     const fromUrl = urlChat(window.location.search)
-    const openId = chatReady ? activeSession.current : fromUrl.kind === 'chat' ? fromUrl.id : 'draft'
+    const openId = switchTarget.current ?? (chatReady ? activeSession.current : fromUrl.kind === 'chat' ? fromUrl.id : 'draft')
     let leaving: Promise<void> | undefined
     if (id === openId) {
       const next = remaining[0]
