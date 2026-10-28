@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { del, get, list, put } from '@vercel/blob'
+import type { del, get, list, put } from '@vercel/blob'
 import {
   MAX_CHAT_ASSETS, MAX_DAILY_ASSETS, finishDesignAssetCleanup, pendingDesignAssetCleanups,
   queueDesignAssetCleanup, readDesignAssets, recordDesignAssets, reserveDesignAssets,
@@ -18,7 +18,16 @@ export interface DesignAssetStore {
   list: typeof list
 }
 
-const BLOB: DesignAssetStore = { put, get, del, list }
+// @vercel/blob carries its own undici, jose and the Vercel OIDC client (~0.6 MB), so it
+// loads on the first Blob call: routes that import this module cold-start without it.
+let blob: Promise<typeof import('@vercel/blob')> | undefined
+const loadBlob = () => blob ??= import('@vercel/blob')
+const BLOB: DesignAssetStore = {
+  put: async (...args) => (await loadBlob()).put(...args),
+  get: async (...args) => (await loadBlob()).get(...args),
+  del: async (...args) => (await loadBlob()).del(...args),
+  list: async (...args) => (await loadBlob()).list(...args),
+}
 
 /** A message that would pass the per-chat or per-day image cap. Nothing was stored. */
 export class DesignAssetLimitError extends Error {
