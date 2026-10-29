@@ -388,7 +388,7 @@ test('a chat started with a DESIGN.md carries it in the instructions of every pr
 test('the instructions make the agent screenshot its design before claiming it matches a reference', async (t) => {
   const f = fixture(t)
   await runtime.submitPrompt(boundHost('reference-chat'), 'Ada', 'Reimplement this exactly')
-  assert.match(f.sent[0].sessionOptions.instructions, /reference to match or asks for an exact copy, verify before reporting: after publishing, call screenshot_design/)
+  assert.match(f.sent[0].sessionOptions.instructions, /reference to match or asks for an exact copy, verify before reporting: after publishing, call screenshot_design at the width the reference was made at/)
 })
 
 test('image messages use prompt admission and retain their images, identity and chat context', async (t) => {
