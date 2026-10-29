@@ -385,6 +385,12 @@ test('a chat started with a DESIGN.md carries it in the instructions of every pr
   assert.match(f.sent[0].sessionOptions.instructions, /<design_md>\nUse teal\.\n<\/design_md>/)
 })
 
+test('the instructions make the agent screenshot its design before claiming it matches a reference', async (t) => {
+  const f = fixture(t)
+  await runtime.submitPrompt(boundHost('reference-chat'), 'Ada', 'Reimplement this exactly')
+  assert.match(f.sent[0].sessionOptions.instructions, /reference to match or asks for an exact copy, verify before reporting: after publishing, call screenshot_design/)
+})
+
 test('image messages use prompt admission and retain their images, identity and chat context', async (t) => {
   const f = fixture(t)
   const host = boundHost('image-chat')
