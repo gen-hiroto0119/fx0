@@ -124,7 +124,7 @@ export function createTools(host: ToolHost, opts: { allowSubagent?: boolean } = 
   const screenshotDesign: FxHostTool = {
     name: 'screenshot_design',
     description:
-      'Screenshot the published design as the preview renders it, at the size the user sees it (1280x800 when the preview is closed). By default it shows the visible viewport; set full_page to see the whole page, top to bottom, in viewport-high images (at most 8). Use it to check the result when appearance matters, such as matching a reference or a layout you cannot verify from the markup, not after every edit; use full_page when the sections below the first screen matter. Needs an fx0 tab open and in front; on failure, continue without it.',
+      'Screenshot the published design as the preview renders it, at the size the user sees it (1280x800 when the preview is closed). By default it shows the visible viewport; set full_page to see the whole page, top to bottom, in viewport-high images (at most 8). Use it after publishing when the user attached a reference to match or the layout cannot be verified from the markup; skip it for copy, color, or other small edits. Use full_page when the sections below the first screen matter. Needs an fx0 tab open and in front; on failure, continue without it.',
     inputSchema: {
       type: 'object',
       properties: { full_page: { type: 'boolean', description: 'Whole page in viewport-high images instead of the visible viewport.' } },
