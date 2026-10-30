@@ -32,6 +32,7 @@ export type Terrain = {
   height: number[] // metres above sea level
   kind: TileKind[]
   cover: LandCover[]
+  basin: { x: number; y: number } | null // centre of the intermontane basin, if any
   resources: Resource[]
 }
 

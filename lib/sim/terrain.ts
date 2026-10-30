@@ -1,7 +1,7 @@
 // @ts-expect-error Node strip-types tests require the source extension.
 import { TILE_M } from './params.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
-import { fbm } from './rng.ts'
+import { fbm, mulberry32 } from './rng.ts'
 import type { City, CityKind, LandCover, Resource, Terrain, TileKind } from './types.ts'
 
 // Terrain follows the stream power law: where the ground is uplifted, rivers
@@ -49,17 +49,39 @@ const VALLEY_HALF_WIDTH_TILES = [
 const PLAIN_ROUGHNESS_M = 3
 const PLAIN_ROUGHNESS_TILES = 6
 
+// An intermontane basin (盆地) like Kofu or Kyoto: a patch of the mountains
+// that does not rise, so it fills with sediment and becomes a flat floor
+// ringed by fans, drained through a gorge.
+const BASIN = {
+  offsetTiles: [12, 26] as const, // how far east of the mountain front its centre sits
+  radiusTiles: [9, 14] as const,
+  rimFanKm: 2, // fans spread this far onto the floor from the surrounding mountains
+  floorSlope: 1 / 1000,
+}
+
+// Deltas: big rivers push their mouth out into the sea and split into
+// distributaries across the new land.
+const DELTA = {
+  minAreaKm2: 100,
+  radiusPerSqrtKm2: 0.9, // tiles of new land per square root of catchment
+  radiusTiles: [4, 14] as const,
+  distributaryAngles: [-0.55, 0, 0.55], // radians either side of the river's direction
+  mouthHeightM: 1,
+}
+
 const RIVER_MIN_AREA_KM2 = 36
 const SEA_DEPTH_M = -10
 
 // Land cover (rise over run for slopes, metres for heights).
-const PADDY_MAX = { heightM: 14, slope: 0.02 } // low, flat ground along the rivers is rice paddy
+const PADDY_MAX = { aboveStreamM: 6, slope: 0.02 } // flat ground close to stream level is rice paddy
 const BARE_SLOPE = 0.55 // rock shows where it is too steep for forest
 const PLANTATION_MAX_M = 500 // cedar and cypress plantations stay on the lower mountain slopes
 
-// Landforms from height and slope (metres, rise over run).
-const MOUNTAIN = { heightM: 350, slope: 0.3 }
-const HILL = { heightM: 120, slope: 0.1 }
+// Landforms from local relief (height range within two tiles) and slope, so a
+// basin floor high in the mountains is still plain.
+const RELIEF_RADIUS_TILES = 2
+const MOUNTAIN = { reliefM: 150, slope: 0.3 }
+const HILL = { reliefM: 70, slope: 0.1 }
 
 const NEIGHBORS = [
   [1, 0],
@@ -177,9 +199,33 @@ function mountainFront(seed: number, size: number, x: number, y: number): number
   return (MOUNTAIN_FRONT_SHARE + wander + ragged) * size
 }
 
+type Basin = { x: number; y: number; rx: number; ry: number }
+
+function placeBasin(seed: number, size: number): Basin | null {
+  const random = mulberry32(seed + 8101)
+  const y = (0.25 + 0.5 * random()) * size
+  const [minOffset, maxOffset] = BASIN.offsetTiles
+  const [minRadius, maxRadius] = BASIN.radiusTiles
+  const x = mountainFront(seed, size, size * 0.6, y) + minOffset + (maxOffset - minOffset) * random()
+  const rx = minRadius + (maxRadius - minRadius) * random()
+  const ry = minRadius + (maxRadius - minRadius) * random()
+  if (x + rx > size - 4) return null
+  return { x, y, rx, ry }
+}
+
+// How far inside the basin a tile is: 1 on the floor, 0 outside, with a
+// ragged rim. Also returns the distance to the rim for the marginal fans.
+function basinAt(seed: number, basin: Basin | null, x: number, y: number): { inside: number; rimKm: number } {
+  if (!basin) return { inside: 0, rimKm: Infinity }
+  const ragged = 1 + 0.3 * (fbm(seed + 8203, x / 6, y / 6, 2) - 0.5)
+  const d = Math.hypot((x - basin.x) / basin.rx, (y - basin.y) / basin.ry) * ragged
+  const rimKm = Math.max(0, (1 - d) * Math.min(basin.rx, basin.ry) * (TILE_M / 1000))
+  return { inside: smoothstep((1 - d) / 0.2), rimKm }
+}
+
 // U/K for every tile: full in the mountains, rising across the front, and
-// patchy low hills in the plain.
-function upliftOverErodibility(seed: number, size: number): number[] {
+// patchy low hills in the plain. The basin does not rise.
+function upliftOverErodibility(seed: number, size: number, basin: Basin | null): number[] {
   const tileKm = TILE_M / 1000
   return Array.from({ length: size * size }, (_, i) => {
     const x = i % size
@@ -188,13 +234,19 @@ function upliftOverErodibility(seed: number, size: number): number[] {
     const mountains = smoothstep(eastOfFrontKm / UPLIFT_RAMP_KM) * MOUNTAIN_U_OVER_K
     const variation = 0.7 + 0.6 * fbm(seed + 2203, x / 24, y / 24, 3)
     const hills = HILL_U_OVER_K * smoothstep((fbm(seed + 3301, x / 14, y / 14, 3) - 0.62) / 0.12)
-    return Math.max(mountains * variation, hills)
+    const sinking = 1 - basinAt(seed, basin, x, y).inside
+    return Math.max(mountains * variation * sinking, hills)
   })
 }
 
 // Slope the plain is built with where uplift does not hold up the ground.
-function plainSlope(seed: number, size: number, i: number, tilesToSea: number): number {
+function plainSlope(seed: number, size: number, i: number, tilesToSea: number, basin: Basin | null): number {
   const tileKm = TILE_M / 1000
+  const inBasin = basinAt(seed, basin, i % size, Math.floor(i / size))
+  if (inBasin.inside > 0.5) {
+    const t = smoothstep(inBasin.rimKm / BASIN.rimFanKm)
+    return FAN_SLOPE * (1 - t) + BASIN.floorSlope * t
+  }
   const westOfFrontKm = (mountainFront(seed, size, i % size, Math.floor(i / size)) - (i % size)) * tileKm
   if (westOfFrontKm < FAN_KM) {
     const t = smoothstep(westOfFrontKm / FAN_KM)
@@ -275,10 +327,11 @@ function fillPits(size: number, height: number[], sea: boolean[]): number[] {
 // --- Generation ---
 
 export function generateTerrain(seed: number, size: number): Terrain {
-  const sea = seaMask(seed, size)
+  const basin = placeBasin(seed, size)
+  let sea = seaMask(seed, size)
   const tilesToSea = coastDistance(size, sea)
-  const uOverK = upliftOverErodibility(seed, size)
-  const plain = Array.from({ length: size * size }, (_, i) => plainSlope(seed, size, i, tilesToSea[i]))
+  const uOverK = upliftOverErodibility(seed, size, basin)
+  const plain = Array.from({ length: size * size }, (_, i) => plainSlope(seed, size, i, tilesToSea[i], basin))
 
   // A rough first surface only decides where the first valleys run.
   let height = Array.from({ length: size * size }, (_, i) =>
@@ -306,11 +359,16 @@ export function generateTerrain(seed: number, size: number): Terrain {
   drainage = computeDrainage(size, height, sea)
   height = fillPits(size, raisePlateaus(seed, size, height, sea, drainage, uOverK), sea)
   drainage = computeDrainage(size, height, sea)
+  const delta = buildDeltas(seed, size, height, sea, drainage)
+  sea = delta.sea
+  height = delta.height
+  drainage = computeDrainage(size, height, sea)
 
   const slope = localSlopes(size, height, sea, drainage)
-  const kind = classifyLandform(size, height, sea, slope, drainage)
-  const cover = classifyCover(seed, size, height, kind, slope)
-  const terrain: Terrain = { size, height, kind, cover, resources: [] }
+  const kind = classifyLandform(size, height, sea, slope, drainage, delta.channels)
+  const cover = classifyCover(seed, size, height, kind, slope, drainage)
+  const basinCentre = basin ? { x: Math.round(basin.x), y: Math.round(basin.y) } : null
+  const terrain: Terrain = { size, height, kind, cover, basin: basinCentre, resources: [] }
   terrain.resources = placeResources(terrain)
   return terrain
 }
@@ -376,6 +434,84 @@ function raisePlateaus(
   })
 }
 
+// Pushes land out into the sea at big river mouths and carves distributary
+// channels across it. Returns the new sea mask and heights, and the channel
+// tiles, which are always river.
+function buildDeltas(seed: number, size: number, height: number[], seaIn: boolean[], drainage: Drainage) {
+  const sea = seaIn.slice()
+  const next = height.slice()
+  const channels = new Set<number>()
+  const mouths = drainage.lowToHigh
+    .filter((i) => {
+      const r = drainage.receiver[i]
+      return r >= 0 && seaIn[r] && drainage.areaM2[i] >= DELTA.minAreaKm2 * 1e6
+    })
+    .sort((a, b) => drainage.areaM2[b] - drainage.areaM2[a])
+  const built: { x: number; y: number; radius: number }[] = []
+
+  for (const mouth of mouths) {
+    const mx = mouth % size
+    const my = Math.floor(mouth / size)
+    const [minR, maxR] = DELTA.radiusTiles
+    const radius = Math.max(minR, Math.min(maxR, Math.round(DELTA.radiusPerSqrtKm2 * Math.sqrt(drainage.areaM2[mouth] / 1e6))))
+    if (built.some((b) => Math.hypot(b.x - mx, b.y - my) < b.radius + radius)) continue
+    built.push({ x: mx, y: my, radius })
+
+    // The river's direction as it reaches the sea.
+    const r = drainage.receiver[mouth]
+    const len = Math.hypot((r % size) - mx, Math.floor(r / size) - my)
+    const dirX = ((r % size) - mx) / len
+    const dirY = (Math.floor(r / size) - my) / len
+
+    // A lobe of low land in front of the mouth, with a ragged shoreline.
+    for (let y = my - radius; y <= my + radius; y++) {
+      for (let x = mx - radius; x <= mx + radius; x++) {
+        if (x < 0 || y < 0 || x >= size || y >= size) continue
+        const i = y * size + x
+        if (!sea[i]) continue
+        const dx = x - mx
+        const dy = y - my
+        const d = Math.hypot(dx, dy)
+        const forward = d > 0 ? (dx * dirX + dy * dirY) / d : 1
+        const reach = radius * (0.75 + 0.5 * fbm(seed + 9001, x / 3, y / 3, 2)) * (0.4 + 0.6 * Math.max(0, forward))
+        if (d > reach) continue
+        sea[i] = false
+        next[i] = DELTA.mouthHeightM * (1 - d / (reach + 1)) + 0.05
+      }
+    }
+
+    // Distributaries fan out from the mouth to the new shoreline.
+    for (const angle of DELTA.distributaryAngles) {
+      const cos = Math.cos(angle)
+      const sin = Math.sin(angle)
+      const ax = dirX * cos - dirY * sin
+      const ay = dirX * sin + dirY * cos
+      let px = mx
+      let py = my
+      let prev = mouth
+      for (let step = 0; step < radius * 3; step++) {
+        const bend = 0.6 * (fbm(seed + 9103 + Math.round(angle * 10), px / 4, py / 4, 2) - 0.5)
+        px += ax - ay * bend
+        py += ay + ax * bend
+        const tx = Math.round(px)
+        const ty = Math.round(py)
+        if (tx < 0 || ty < 0 || tx >= size || ty >= size) break
+        const i = ty * size + tx
+        if (i === prev) continue
+        // Keep the channel connected edge to edge.
+        const prevX = prev % size
+        const prevY = Math.floor(prev / size)
+        if (tx !== prevX && ty !== prevY && !sea[prevY * size + tx]) channels.add(prevY * size + tx)
+        if (sea[i]) break
+        channels.add(i)
+        prev = i
+      }
+    }
+    channels.add(mouth)
+  }
+  return { sea, height: next, channels }
+}
+
 // Each tile's slope toward the tile it drains to.
 function localSlopes(size: number, height: number[], sea: boolean[], drainage: Drainage): number[] {
   return height.map((h, i) => {
@@ -385,13 +521,44 @@ function localSlopes(size: number, height: number[], sea: boolean[], drainage: D
   })
 }
 
-function classifyLandform(size: number, height: number[], sea: boolean[], slope: number[], drainage: Drainage): TileKind[] {
-  const kind: TileKind[] = height.map((h, i) => {
+// Height range within a few tiles: how hilly the surroundings are.
+function localRelief(size: number, height: number[], sea: boolean[]): number[] {
+  const R = RELIEF_RADIUS_TILES
+  return height.map((_, i) => {
+    const x = i % size
+    const y = Math.floor(i / size)
+    let lo = Infinity
+    let hi = -Infinity
+    for (let dy = -R; dy <= R; dy++) {
+      for (let dx = -R; dx <= R; dx++) {
+        const nx = x + dx
+        const ny = y + dy
+        if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue
+        const h = sea[ny * size + nx] ? 0 : height[ny * size + nx]
+        lo = Math.min(lo, h)
+        hi = Math.max(hi, h)
+      }
+    }
+    return hi - lo
+  })
+}
+
+function classifyLandform(
+  size: number,
+  height: number[],
+  sea: boolean[],
+  slope: number[],
+  drainage: Drainage,
+  channels: Set<number>,
+): TileKind[] {
+  const relief = localRelief(size, height, sea)
+  const kind: TileKind[] = height.map((_, i) => {
     if (sea[i]) return 'sea'
-    if (h > MOUNTAIN.heightM || slope[i] > MOUNTAIN.slope) return 'mountain'
-    if (h > HILL.heightM || slope[i] > HILL.slope) return 'hill'
+    if (relief[i] > MOUNTAIN.reliefM || slope[i] > MOUNTAIN.slope) return 'mountain'
+    if (relief[i] > HILL.reliefM || slope[i] > HILL.slope) return 'hill'
     return 'plain'
   })
+  for (const i of channels) if (!sea[i]) kind[i] = 'river'
 
   // Large catchments are rivers. A diagonal step also marks one side tile so
   // the river stays connected edge to edge on the grid.
@@ -415,7 +582,37 @@ function classifyLandform(size: number, height: number[], sea: boolean[], slope:
 // river lowland, fields on fans and plateaus with scattered groves, coppice
 // woods (里山) and bamboo on hills and scarps, cedar plantations low in the
 // mountains, broadleaf forest above them, and rock where it is too steep.
-function classifyCover(seed: number, size: number, height: number[], kind: TileKind[], slope: number[]): LandCover[] {
+// Height of each tile above the nearest stream (rivers and the streams that
+// cut valleys), found by spreading stream levels outward over the grid.
+function heightAboveStream(size: number, height: number[], kind: TileKind[], drainage: Drainage): number[] {
+  const streamLevel = new Array<number>(size * size).fill(NaN)
+  const queue: number[] = []
+  for (let i = 0; i < size * size; i++) {
+    if (kind[i] === 'river' || (kind[i] !== 'sea' && drainage.areaM2[i] >= VALLEY_MIN_AREA_KM2 * 1e6)) {
+      streamLevel[i] = height[i]
+      queue.push(i)
+    }
+  }
+  for (let k = 0; k < queue.length; k++) {
+    const c = queue[k]
+    forEachNeighbor(size, c, (n) => {
+      if (!Number.isNaN(streamLevel[n])) return
+      streamLevel[n] = streamLevel[c]
+      queue.push(n)
+    })
+  }
+  return height.map((h, i) => (Number.isNaN(streamLevel[i]) ? Infinity : h - streamLevel[i]))
+}
+
+function classifyCover(
+  seed: number,
+  size: number,
+  height: number[],
+  kind: TileKind[],
+  slope: number[],
+  drainage: Drainage,
+): LandCover[] {
+  const aboveStream = heightAboveStream(size, height, kind, drainage)
   const noise = (offset: number, i: number, scale: number) => fbm(seed + offset, (i % size) / scale, Math.floor(i / size) / scale, 2)
   return kind.map((k, i) => {
     switch (k) {
@@ -430,7 +627,7 @@ function classifyCover(seed: number, size: number, height: number[], kind: TileK
         return noise(6203, i, 8) > 0.6 ? 'conifer' : 'satoyama'
       case 'plain':
         if (noise(77, i, 10) > 0.68) return 'grove'
-        return height[i] < PADDY_MAX.heightM && slope[i] < PADDY_MAX.slope ? 'paddy' : 'field'
+        return aboveStream[i] < PADDY_MAX.aboveStreamM && slope[i] < PADDY_MAX.slope ? 'paddy' : 'field'
     }
   })
 }
@@ -479,7 +676,12 @@ const CITY_SPECS: { id: string; name: string; kind: CityKind; persona: City['per
 export function placeCities(t: Terrain): City[] {
   return CITY_SPECS.map((s) => {
     const port = t.resources.find((r) => r.kind === 'port')
-    const [px, py] = s.kind === 'port' && port ? [port.x + 2, port.y] : [s.at[0] * t.size, s.at[1] * t.size]
+    const [px, py] =
+      s.kind === 'port' && port
+        ? [port.x + 2, port.y]
+        : s.kind === 'mountain' && t.basin
+          ? [t.basin.x, t.basin.y]
+          : [s.at[0] * t.size, s.at[1] * t.size]
     const i = nearest(t, px, py, (j) => t.kind[j] === s.tile || t.kind[j] === 'plain')
     return { id: s.id, name: s.name, kind: s.kind, persona: s.persona, x: i % t.size, y: Math.floor(i / t.size) }
   })
