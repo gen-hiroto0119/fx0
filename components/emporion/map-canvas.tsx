@@ -33,17 +33,24 @@ const USE_COLOR: Record<string, string> = {
   station: '#0891b2',
 }
 
+// Light comes from the north-west: slopes facing it are brighter.
+const HILLSHADE_M = 400 // height difference across two tiles that darkens a slope fully
+
 // The terrain never changes for a seed, so it is drawn once into a 1px-per-tile image.
 function terrainImage(world: World): HTMLCanvasElement {
-  const { size, kind } = world.terrain
+  const { size, kind, height } = world.terrain
   const canvas = document.createElement('canvas')
   canvas.width = size
   canvas.height = size
   const ctx = canvas.getContext('2d')!
   const image = ctx.createImageData(size, size)
+  const at = (x: number, y: number) => height[Math.min(size - 1, Math.max(0, y)) * size + Math.min(size - 1, Math.max(0, x))]
   for (let i = 0; i < size * size; i++) {
     const [r, g, b] = TERRAIN_RGB[kind[i]]
-    const shade = 0.85 + 0.3 * (world.terrain.height[i] - 0.5)
+    const x = i % size
+    const y = Math.floor(i / size)
+    const facing = at(x + 1, y) - at(x - 1, y) + at(x, y + 1) - at(x, y - 1)
+    const shade = kind[i] === 'sea' ? 1 : Math.max(0.45, Math.min(1.25, 1 - facing / HILLSHADE_M))
     image.data[i * 4] = Math.min(255, r * shade)
     image.data[i * 4 + 1] = Math.min(255, g * shade)
     image.data[i * 4 + 2] = Math.min(255, b * shade)

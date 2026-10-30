@@ -1,46 +1,42 @@
 // @ts-expect-error Node strip-types tests require the source extension.
+import { TILE_M } from './params.ts'
+// @ts-expect-error Node strip-types tests require the source extension.
 import { fbm } from './rng.ts'
 import type { City, CityKind, Resource, Terrain, TileKind } from './types.ts'
 
-const NOISE_SCALE = 4 // noise cells across the map: the size of hills and valleys
-const WARP = 0.8 // how far (in noise cells) valleys are bent sideways
-const RIVER_MIN_CATCHMENT = 900 // tiles draining through a tile before it is drawn as river
-// Water routing sees the height plus a smooth wobble of about this size, so
-// rivers swing back and forth even on an even slope.
-const MEANDER_AMPLITUDE = 0.2
-const MEANDER_TILES = 12 // wavelength of the wobble, in tiles
+// Terrain follows the stream power law: where the ground is uplifted, rivers
+// cut down until erosion balances uplift, which at steady state gives each
+// channel the slope S = (U / K) / A^m (A = drainage area). Mountains, valleys
+// and their river networks emerge from that balance. Where there is no uplift
+// (the plain), slopes are set from Japanese river segments instead: alluvial
+// fans below the mountain front, then floodplain, then a delta at the coast.
+// Heights are in metres; the sea surface is 0.
 
-// The region tilts from sea in the west up to mountains in the east, so every
-// seed has a coast, a plain and a mountain range for the three cities.
-// The hills are domain-warped noise: the noise is read at shifted coordinates,
-// which bends ridges and valleys so the rivers that follow them meander.
-export function generateTerrain(seed: number, size: number): Terrain {
-  const height: number[] = new Array(size * size)
-  const kind: TileKind[] = new Array(size * size)
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const nx = (x / size) * NOISE_SCALE
-      const ny = (y / size) * NOISE_SCALE
-      const warpX = fbm(seed + 311, nx * 0.75, ny * 0.75, 3) - 0.5
-      const warpY = fbm(seed + 733, nx * 0.75, ny * 0.75, 3) - 0.5
-      const n = fbm(seed, nx + WARP * warpX, ny + WARP * warpY)
-      height[y * size + x] = 0.5 * n + 0.7 * (x / size) - 0.1
-    }
-  }
-  for (let i = 0; i < size * size; i++) {
-    const h = height[i]
-    const forest = fbm(seed + 77, (i % size) / 10, Math.floor(i / size) / 10, 2)
-    if (h < 0.15) kind[i] = 'sea'
-    else if (h > 0.78) kind[i] = 'mountain'
-    else if (h > 0.6) kind[i] = forest > 0.6 ? 'forest' : 'hill'
-    else kind[i] = forest > 0.66 ? 'forest' : 'plain'
-  }
-  carveRivers(seed, size, height, kind)
+const NOISE_SCALE = 4 // noise cells across the map: the size of the initial roughness
+const WARP = 0.8 // how far (in noise cells) the initial valleys are bent sideways
 
-  const terrain: Terrain = { size, height, kind, resources: [] }
-  terrain.resources = placeResources(terrain)
-  return terrain
-}
+const AREA_EXPONENT = 0.5 // m in the stream power law (with n = 1)
+const MOUNTAIN_U_OVER_K = 60 // uplift over erodibility in the mountains (m^1/2 in area units of m2)
+const HILL_U_OVER_K = 25 // scattered low hills and terraces rising out of the plain
+const MOUNTAIN_FRONT_SHARE = 0.58 // west edge of the uplift, as a share of the map width
+const UPLIFT_RAMP_KM = 4 // uplift grows from nothing to full over this distance east of the front
+const MAX_SLOPE = Math.tan(Math.PI / 6) // hillslopes cannot stand steeper than 30 degrees
+const EROSION_ITERATIONS = 8
+
+// Gradients of Japanese river segments (MLIT): fan 1/60-1/400,
+// floodplain 1/400-1/5000, delta below 1/5000.
+const FAN_SLOPE = 1 / 150
+const FAN_KM = 5
+const FLOODPLAIN_SLOPE = 1 / 2000
+const DELTA_SLOPE = 1 / 6000
+const DELTA_KM = 2.5
+
+const RIVER_MIN_AREA_KM2 = 36
+const SEA_DEPTH_M = -10
+
+// Kinds from height and slope (metres, rise over run).
+const MOUNTAIN = { heightM: 350, slope: 0.3 }
+const HILL = { heightM: 60, slope: 0.1 }
 
 const NEIGHBORS = [
   [1, 0],
@@ -49,7 +45,19 @@ const NEIGHBORS = [
   [0, -1],
 ] as const
 
-// Minimal binary heap keyed by priority, for the priority-flood below.
+const NEIGHBORS_8 = [
+  [1, 0, 1],
+  [-1, 0, 1],
+  [0, 1, 1],
+  [0, -1, 1],
+  [1, 1, Math.SQRT2],
+  [1, -1, Math.SQRT2],
+  [-1, 1, Math.SQRT2],
+  [-1, -1, Math.SQRT2],
+] as const
+
+// --- Small helpers ---
+
 function heapPush(heap: [number, number][], item: [number, number]) {
   heap.push(item)
   let i = heap.length - 1
@@ -81,67 +89,6 @@ function heapPop(heap: [number, number][]): [number, number] | undefined {
   return top
 }
 
-// Where every tile's water goes. The routing surface is the height plus a
-// smooth wobble (MEANDER_*), so rivers swing even on an even slope.
-// 1. A priority-flood from the sea and the map edge raises every pit to its
-//    spill level, so all water can reach an outlet. The flood front spreads in
-//    order of the wobble, so across a filled flat it advances unevenly.
-// 2. On slopes a tile drains to its lowest neighbour; on a filled flat it
-//    drains to the tile the front came from, which winds instead of running
-//    straight to the spill point.
-// Returns each tile's downstream tile (-1 for outlets) and every tile ordered
-// from the lowest to the highest, so downstream tiles always come first.
-function drainage(seed: number, size: number, height: number[], kind: TileKind[]) {
-  const wobble = (i: number) =>
-    MEANDER_AMPLITUDE * (fbm(seed + 997, (i % size) / MEANDER_TILES, Math.floor(i / size) / MEANDER_TILES, 2) - 0.5)
-  const surface = height.map((h, i) => h + wobble(i))
-  const filled = surface.slice()
-  const cameFrom = new Array<number>(size * size).fill(-1)
-  const raised = new Array<boolean>(size * size).fill(false)
-  const reached = new Array<boolean>(size * size).fill(false)
-  const isOutlet = new Array<boolean>(size * size).fill(false)
-  const heap: [number, number][] = []
-
-  for (let i = 0; i < size * size; i++) {
-    const x = i % size
-    const y = Math.floor(i / size)
-    const onEdge = x === 0 || y === 0 || x === size - 1 || y === size - 1
-    if (kind[i] !== 'sea' && !onEdge) continue
-    reached[i] = true
-    isOutlet[i] = true
-    heapPush(heap, [filled[i], i])
-  }
-
-  for (let item = heapPop(heap); item; item = heapPop(heap)) {
-    const c = item[1]
-    forEachNeighbor(size, c, (n) => {
-      if (reached[n]) return
-      reached[n] = true
-      cameFrom[n] = c
-      raised[n] = surface[n] <= filled[c]
-      filled[n] = Math.max(surface[n], filled[c] + 1e-6)
-      // Inside a flat the front is steered by the wobble instead of distance.
-      heapPush(heap, [raised[n] ? filled[n] + wobble(n) : filled[n], n])
-    })
-  }
-
-  const downstream = new Array<number>(size * size).fill(-1)
-  for (let i = 0; i < size * size; i++) {
-    if (isOutlet[i]) continue
-    if (raised[i]) {
-      downstream[i] = cameFrom[i]
-      continue
-    }
-    let lowest = cameFrom[i]
-    forEachNeighbor(size, i, (n) => {
-      if (filled[n] < filled[lowest]) lowest = n
-    })
-    downstream[i] = lowest
-  }
-  const lowToHigh = Array.from({ length: size * size }, (_, i) => i).sort((a, b) => filled[a] - filled[b])
-  return { downstream, lowToHigh }
-}
-
 function forEachNeighbor(size: number, i: number, visit: (n: number) => void) {
   const x = i % size
   const y = Math.floor(i / size)
@@ -152,17 +99,223 @@ function forEachNeighbor(size: number, i: number, visit: (n: number) => void) {
   }
 }
 
-// Tiles that collect water from a large enough area become river.
-function carveRivers(seed: number, size: number, height: number[], kind: TileKind[]) {
-  const { downstream, lowToHigh } = drainage(seed, size, height, kind)
-  const catchment = new Array<number>(size * size).fill(1)
+const smoothstep = (t: number) => {
+  const c = Math.max(0, Math.min(1, t))
+  return c * c * (3 - 2 * c)
+}
+
+// --- Inputs: coast, roughness, uplift and plain gradients ---
+
+function warpedNoise(seed: number, size: number, x: number, y: number): number {
+  const nx = (x / size) * NOISE_SCALE
+  const ny = (y / size) * NOISE_SCALE
+  const warpX = fbm(seed + 311, nx * 0.75, ny * 0.75, 3) - 0.5
+  const warpY = fbm(seed + 733, nx * 0.75, ny * 0.75, 3) - 0.5
+  return fbm(seed, nx + WARP * warpX, ny + WARP * warpY)
+}
+
+// The sea fills the low western edge of a tilted noise surface.
+function seaMask(seed: number, size: number): boolean[] {
+  const sea: boolean[] = new Array(size * size)
+  for (let i = 0; i < size * size; i++) {
+    const x = i % size
+    const y = Math.floor(i / size)
+    sea[i] = 0.5 * warpedNoise(seed, size, x, y) + 0.7 * (x / size) - 0.1 < 0.15
+  }
+  return sea
+}
+
+// Tiles to the nearest sea tile, walking the grid.
+function coastDistance(size: number, sea: boolean[]): number[] {
+  const dist = new Array<number>(size * size).fill(Infinity)
+  const queue: number[] = []
+  sea.forEach((s, i) => {
+    if (!s) return
+    dist[i] = 0
+    queue.push(i)
+  })
+  for (let k = 0; k < queue.length; k++) {
+    const c = queue[k]
+    forEachNeighbor(size, c, (n) => {
+      if (dist[n] !== Infinity) return
+      dist[n] = dist[c] + 1
+      queue.push(n)
+    })
+  }
+  return dist
+}
+
+// Column where the mountains begin at a tile. The front wanders along the
+// rows and is ragged locally, so spurs reach into the plain and valleys reach
+// into the mountains.
+function mountainFront(seed: number, size: number, x: number, y: number): number {
+  const wander = 0.25 * (fbm(seed + 1501, y / 28, 0.5, 2) - 0.5)
+  const ragged = 0.08 * (fbm(seed + 1777, x / 9, y / 9, 3) - 0.5)
+  return (MOUNTAIN_FRONT_SHARE + wander + ragged) * size
+}
+
+// U/K for every tile: full in the mountains, rising across the front, and
+// patchy low hills in the plain.
+function upliftOverErodibility(seed: number, size: number): number[] {
+  const tileKm = TILE_M / 1000
+  return Array.from({ length: size * size }, (_, i) => {
+    const x = i % size
+    const y = Math.floor(i / size)
+    const eastOfFrontKm = (x - mountainFront(seed, size, x, y)) * tileKm
+    const mountains = smoothstep(eastOfFrontKm / UPLIFT_RAMP_KM) * MOUNTAIN_U_OVER_K
+    const variation = 0.7 + 0.6 * fbm(seed + 2203, x / 24, y / 24, 3)
+    const hills = HILL_U_OVER_K * smoothstep((fbm(seed + 3301, x / 14, y / 14, 3) - 0.62) / 0.12)
+    return Math.max(mountains * variation, hills)
+  })
+}
+
+// Slope the plain is built with where uplift does not hold up the ground.
+function plainSlope(seed: number, size: number, i: number, tilesToSea: number): number {
+  const tileKm = TILE_M / 1000
+  const westOfFrontKm = (mountainFront(seed, size, i % size, Math.floor(i / size)) - (i % size)) * tileKm
+  if (westOfFrontKm < FAN_KM) {
+    const t = smoothstep(westOfFrontKm / FAN_KM)
+    return FAN_SLOPE * (1 - t) + FLOODPLAIN_SLOPE * t
+  }
+  return tilesToSea * tileKm < DELTA_KM ? DELTA_SLOPE : FLOODPLAIN_SLOPE
+}
+
+// --- Drainage ---
+
+export type Drainage = {
+  receiver: number[] // tile each tile drains to, -1 for the sea
+  distanceM: number[] // length of that step
+  areaM2: number[] // drainage area including the tile itself
+  lowToHigh: number[] // land tiles from the lowest to the highest
+}
+
+// Each land tile drains to its steepest-downhill neighbour of the eight.
+export function computeDrainage(size: number, height: number[], sea: boolean[]): Drainage {
+  const receiver = new Array<number>(size * size).fill(-1)
+  const distanceM = new Array<number>(size * size).fill(0)
+  for (let i = 0; i < size * size; i++) {
+    if (sea[i]) continue
+    const x = i % size
+    const y = Math.floor(i / size)
+    let best = -1
+    let bestDrop = 0
+    let bestDist = 0
+    for (const [dx, dy, d] of NEIGHBORS_8) {
+      const nx = x + dx
+      const ny = y + dy
+      if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue
+      const n = ny * size + nx
+      const base = sea[n] ? 0 : height[n]
+      const drop = (height[i] - base) / d
+      if (drop > bestDrop) {
+        bestDrop = drop
+        best = n
+        bestDist = d
+      }
+    }
+    receiver[i] = best
+    distanceM[i] = bestDist * TILE_M
+  }
+  const lowToHigh = Array.from({ length: size * size }, (_, i) => i)
+    .filter((i) => !sea[i])
+    .sort((a, b) => height[a] - height[b])
+  const areaM2 = new Array<number>(size * size).fill(TILE_M * TILE_M)
   for (let k = lowToHigh.length - 1; k >= 0; k--) {
     const i = lowToHigh[k]
-    if (downstream[i] >= 0) catchment[downstream[i]] += catchment[i]
+    if (receiver[i] >= 0 && !sea[receiver[i]]) areaM2[receiver[i]] += areaM2[i]
   }
+  return { receiver, distanceM, areaM2, lowToHigh }
+}
+
+// Raises every pit to its spill level (priority-flood from the sea), so the
+// starting surface drains everywhere. Only needed for the noisy first surface.
+function fillPits(size: number, height: number[], sea: boolean[]): number[] {
+  const filled = height.slice()
+  const reached = sea.slice()
+  const heap: [number, number][] = []
+  sea.forEach((s, i) => {
+    if (s) heapPush(heap, [0, i])
+  })
+  for (let item = heapPop(heap); item; item = heapPop(heap)) {
+    const c = item[1]
+    const base = sea[c] ? 0 : filled[c]
+    forEachNeighbor(size, c, (n) => {
+      if (reached[n]) return
+      reached[n] = true
+      filled[n] = Math.max(filled[n], base + 1e-3)
+      heapPush(heap, [filled[n], n])
+    })
+  }
+  return filled
+}
+
+// --- Generation ---
+
+export function generateTerrain(seed: number, size: number): Terrain {
+  const sea = seaMask(seed, size)
+  const tilesToSea = coastDistance(size, sea)
+  const uOverK = upliftOverErodibility(seed, size)
+  const plain = Array.from({ length: size * size }, (_, i) => plainSlope(seed, size, i, tilesToSea[i]))
+
+  // A rough first surface only decides where the first valleys run.
+  let height = Array.from({ length: size * size }, (_, i) =>
+    sea[i] ? SEA_DEPTH_M : 150 * warpedNoise(seed, size, i % size, Math.floor(i / size)) + uOverK[i] * 8,
+  )
+  height = fillPits(size, height, sea)
+
+  // Rebuild the surface from the coast upward with steady-state slopes, then
+  // re-route the water over the new surface and repeat.
+  let drainage = computeDrainage(size, height, sea)
+  for (let iteration = 0; iteration < EROSION_ITERATIONS; iteration++) {
+    const next = height.map((h, i) => (sea[i] ? SEA_DEPTH_M : h))
+    for (const i of drainage.lowToHigh) {
+      const r = drainage.receiver[i]
+      const base = r < 0 || sea[r] ? 0 : next[r]
+      const fluvial = uOverK[i] / drainage.areaM2[i] ** AREA_EXPONENT
+      const slope = Math.min(MAX_SLOPE, Math.max(fluvial, plain[i]))
+      next[i] = base + slope * drainage.distanceM[i]
+    }
+    height = next
+    drainage = computeDrainage(size, height, sea)
+  }
+
+  const kind = classify(seed, size, height, sea, drainage)
+  const terrain: Terrain = { size, height, kind, resources: [] }
+  terrain.resources = placeResources(terrain)
+  return terrain
+}
+
+function classify(seed: number, size: number, height: number[], sea: boolean[], drainage: Drainage): TileKind[] {
+  const kind: TileKind[] = new Array(size * size)
   for (let i = 0; i < size * size; i++) {
-    if (kind[i] !== 'sea' && catchment[i] >= RIVER_MIN_CATCHMENT) kind[i] = 'river'
+    if (sea[i]) {
+      kind[i] = 'sea'
+      continue
+    }
+    const r = drainage.receiver[i]
+    const slope = r >= 0 ? (height[i] - (sea[r] ? 0 : height[r])) / drainage.distanceM[i] : 0
+    const forest = fbm(seed + 77, (i % size) / 10, Math.floor(i / size) / 10, 2)
+    if (height[i] > MOUNTAIN.heightM || slope > MOUNTAIN.slope) kind[i] = 'mountain'
+    else if (height[i] > HILL.heightM || slope > HILL.slope) kind[i] = forest > 0.5 ? 'forest' : 'hill'
+    else kind[i] = forest > 0.66 ? 'forest' : 'plain'
   }
+
+  // Large catchments are rivers. A diagonal step also marks one side tile so
+  // the river stays connected edge to edge on the grid.
+  const minArea = RIVER_MIN_AREA_KM2 * 1e6
+  for (let i = 0; i < size * size; i++) {
+    if (sea[i] || drainage.areaM2[i] < minArea) continue
+    kind[i] = 'river'
+    const r = drainage.receiver[i]
+    if (r < 0) continue
+    const dx = (r % size) - (i % size)
+    const dy = Math.floor(r / size) - Math.floor(i / size)
+    if (dx !== 0 && dy !== 0) {
+      const side = Math.floor(i / size) * size + (r % size)
+      if (!sea[side]) kind[side] = 'river'
+    }
+  }
+  return kind
 }
 
 function placeResources(t: Terrain): Resource[] {
