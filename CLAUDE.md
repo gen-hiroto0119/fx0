@@ -1,6 +1,8 @@
-@AGENTS.md
-
 # AGENT向けルール
+
+## Next.js
+
+このリポジトリのNext.jsは、学習データにある版とは異なる。API、規約、ファイル構成に破壊的変更がある。コードを書く前に `node_modules/next/dist/docs/` の該当するガイドを読み、非推奨の告知に従う。
 
 ## ドキュメントとコードとIssue
 

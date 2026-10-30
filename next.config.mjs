@@ -2,6 +2,8 @@ import { withBotId } from 'botid/next/config'
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // The agent rules live in Japanese in CLAUDE.md, so next dev must not write AGENTS.md.
+  agentRules: false,
   cacheComponents: true,
   partialPrefetching: true,
   serverExternalPackages: ['libfx'],
