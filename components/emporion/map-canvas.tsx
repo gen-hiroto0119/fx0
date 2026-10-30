@@ -33,8 +33,25 @@ const USE_COLOR: Record<string, string> = {
   station: '#0891b2',
 }
 
-// Light comes from the north-west: slopes facing it are brighter.
-const HILLSHADE_M = 400 // height difference across two tiles that darkens a slope fully
+// Hillshade lit from the north-west (top-left) at 45 degrees, the direction
+// people assume light comes from; lighting from the other side makes
+// mountains read as hollows. Heights are exaggerated because 200 m tiles make
+// real slopes look faint.
+const LIGHT_AZIMUTH = (315 * Math.PI) / 180
+const LIGHT_ALTITUDE = Math.PI / 4
+const VERTICAL_EXAGGERATION = 3
+const TILE_SPAN_M = 200
+
+function hillshade(dzdx: number, dzdy: number): number {
+  // Surface normal (-dz/dx, -dz/dy, 1) against a light vector; +y points south.
+  const lx = Math.sin(LIGHT_AZIMUTH) * Math.cos(LIGHT_ALTITUDE)
+  const ly = -Math.cos(LIGHT_AZIMUTH) * Math.cos(LIGHT_ALTITUDE)
+  const lz = Math.sin(LIGHT_ALTITUDE)
+  const nx = -dzdx * VERTICAL_EXAGGERATION
+  const ny = -dzdy * VERTICAL_EXAGGERATION
+  const lit = (nx * lx + ny * ly + lz) / Math.hypot(nx, ny, 1)
+  return lit / lz // flat ground keeps its base colour
+}
 
 // The terrain never changes for a seed, so it is drawn once into a 1px-per-tile image.
 function terrainImage(world: World): HTMLCanvasElement {
@@ -49,8 +66,9 @@ function terrainImage(world: World): HTMLCanvasElement {
     const [r, g, b] = TERRAIN_RGB[kind[i]]
     const x = i % size
     const y = Math.floor(i / size)
-    const facing = at(x + 1, y) - at(x - 1, y) + at(x, y + 1) - at(x, y - 1)
-    const shade = kind[i] === 'sea' ? 1 : Math.max(0.45, Math.min(1.25, 1 - facing / HILLSHADE_M))
+    const dzdx = (at(x + 1, y) - at(x - 1, y)) / (2 * TILE_SPAN_M)
+    const dzdy = (at(x, y + 1) - at(x, y - 1)) / (2 * TILE_SPAN_M)
+    const shade = kind[i] === 'sea' ? 1 : Math.max(0.4, Math.min(1.3, hillshade(dzdx, dzdy)))
     image.data[i * 4] = Math.min(255, r * shade)
     image.data[i * 4 + 1] = Math.min(255, g * shade)
     image.data[i * 4 + 2] = Math.min(255, b * shade)
