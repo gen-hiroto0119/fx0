@@ -7,13 +7,15 @@ export * from './corporate.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 export * from './params.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
+export * from './report.ts'
+// @ts-expect-error Node strip-types tests require the source extension.
 export * from './types.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 export { lvAtTile } from './landvalue.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 export { buildingValue } from './realestate.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
-export { lineKm, trainsNeeded } from './network.ts'
+export { chunkAt, lineKm, trainsNeeded } from './network.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 export { projectCost } from './rail.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
