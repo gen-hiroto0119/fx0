@@ -4,16 +4,22 @@ import {
   applyForLine,
   borrow,
   buyLand,
+  chunkAt,
+  closeQuarter,
   createWorld,
+  develop,
   grantLine,
   OKU,
+  PARAMS,
   planLine,
   projectCost,
   setService,
   startConstruction,
   step,
+  TILE_AREA_M2,
 } from '../lib/sim/index.ts'
-import { annuity } from '../lib/sim/finance.ts'
+import { annuity, newLoan } from '../lib/sim/finance.ts'
+import { buildingValue, updateRealEstate } from '../lib/sim/realestate.ts'
 import { edgeMinutes } from '../lib/sim/network.ts'
 import { computeDrainage, generateTerrain } from '../lib/sim/terrain.ts'
 
@@ -161,4 +167,39 @@ test('a line pulls population toward its stations', () => {
   assert.ok(line.stats.dailyRiders > 10_000, `riders ${line.stats.dailyRiders}`)
   assert.ok(withLine.world.ledger.some((e) => e.account === 'fare' && e.amount > 0))
   assert.ok(withLine.pop > without.pop * 1.05, `corridor ${withLine.pop} vs ${without.pop}`)
+})
+
+test('condo sales bring in the value once and repay the construction loan', () => {
+  const world = createWorld(42)
+  const [a] = world.cities
+  const { x, y } = stationsBetween(world, a, { x: a.x + 6, y: a.y }, 2)[1]
+  assert.equal(buyLand(world, 'player', x, y).ok, true)
+  const floor = chunkAt(world, x, y).zoneFar.res * TILE_AREA_M2 * 0.25
+  const built = develop(world, 'player', x, y, 'res', floor, 'sale')
+  assert.equal(built.ok, true)
+  const b = world.buildings.find((v) => v.id === built.value)
+  assert.equal(borrow(world, 'player', { amount: b.cost * 0.71, years: 10, buildingId: b.id }).ok, false)
+  assert.equal(borrow(world, 'player', { amount: b.cost * 0.7, years: 10, graceYears: 2, buildingId: b.id }).ok, true)
+
+  // Skip construction: the homes go on sale now.
+  Object.assign(b, { status: 'selling', ticksLeft: 0, costPaid: b.cost, bookValue: b.cost, saleTicksLeft: 10 })
+  const expected = buildingValue(world, b) * PARAMS.realEstate.condoPremium
+  for (let t = 0; t < 10; t++) updateRealEstate(world)
+
+  const sales = world.ledger.filter((e) => e.account === 'condo_sales').reduce((s, e) => s + e.amount, 0)
+  assert.ok(Math.abs(sales / expected - 1) < 0.05, `sales ${sales} vs value ${expected}`)
+  assert.equal(b.status, 'sold')
+  assert.equal(world.parcels[`${x},${y}`], undefined)
+  assert.equal(world.firms[0].loans.some((l) => l.buildingId === b.id), false)
+})
+
+test('ratings move one notch a quarter', () => {
+  const world = createWorld(42)
+  const firm = world.firms[0]
+  firm.rating = 'AAA'
+  // Heavy borrowing with nothing earning yet deserves BBB at best.
+  newLoan(world, firm, 'corporate', 1_000 * OKU, 0.02, 10, 0)
+  assert.equal(closeQuarter(world, firm).rating, 'A')
+  assert.equal(closeQuarter(world, firm).rating, 'BBB')
+  assert.equal(closeQuarter(world, firm).rating, 'BBB')
 })

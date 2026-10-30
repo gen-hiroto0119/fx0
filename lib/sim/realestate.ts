@@ -1,7 +1,7 @@
 // @ts-expect-error Node strip-types tests require the source extension.
 import { PARAMS, TICKS_PER_YEAR, TILE_AREA_M2, TILE_M } from './params.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
-import { book, firmById } from './finance.ts'
+import { book, firmById, repayBuildingLoans } from './finance.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { stock } from './growth.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
@@ -43,7 +43,8 @@ export function capRate(world: World, b: Building): number {
     RE.capBase +
     PARAMS.finance.baseRate +
     RE.capCityRisk +
-    age * RE.capAgePerYear -
+    age * RE.capAgePerYear +
+    RE.capUsePremium[marketUse(b)] -
     (nearOpenStation(world, b) ? RE.capStationNear : 0)
   )
 }
@@ -60,15 +61,17 @@ export function buildingValue(world: World, b: Building): number {
   return Math.max(0, annualNoi(world, b, occ) / capRate(world, b))
 }
 
-// Rents rise where vacancy is below the natural rate and fall where it is above.
+// Rents rise where vacancy is below the natural rate and fall where it is above,
+// a few percent a year as leases renew rather than all at once.
 export function nextRentMultipliers(chunks: Chunk[]): PerUse[] {
   const [lo, hi] = RE.rentMultRange
   return chunks.map((c) => {
     const next = { ...c.rentMult }
     for (const use of USES) {
       const vacancy = 1 - chunkOccupancy(c, use)
-      const m = c.rentMult[use] * (1 + (RE.rentAdjust * (RE.naturalVacancy - vacancy)) / RE.naturalVacancy)
-      next[use] = Math.max(lo, Math.min(hi, m))
+      const pull = (RE.rentAdjust * (RE.naturalVacancy - vacancy)) / RE.naturalVacancy
+      const change = Math.max(-RE.rentMaxStepPerTick, Math.min(RE.rentMaxStepPerTick, pull))
+      next[use] = Math.max(lo, Math.min(hi, c.rentMult[use] * (1 + change)))
     }
     return next
   })
@@ -87,31 +90,34 @@ function finishConstruction(world: World, firm: Firm, b: Building) {
   book(world, firm.id, 'realestate', 'construction', -rest, false)
 
   b.status = b.mode === 'sale' ? 'selling' : 'operating'
-  b.saleTicksLeft = RE.condoSaleTicks
+  b.saleTicksLeft = Math.max(RE.condoSaleTicks, Math.round(b.floorArea / RE.condoSaleM2PerTick))
   world.events.push({ tick: world.tick, type: 'building_completed', actor: firm.id, x: b.x, y: b.y, importance: 2, payload: { use: b.use } })
 }
 
-// Condos sell in equal slices over a few weeks at the market value plus a premium.
+// Condos sell in equal slices, a few dozen homes a week, at the market value
+// plus a premium. Each slice carries its share of the building and land cost
+// and repays its share of the construction loan.
 function sellCondoUnits(world: World, firm: Firm, b: Building) {
-  const value = buildingValue(world, b) * RE.condoPremium
+  // `share` is the part of the homes still unsold that goes this week; the
+  // unsold part of the whole building is what is left of its book value.
   const share = 1 / b.saleTicksLeft
-  const proceeds = value * share
-  const cost = b.bookValue * share
+  const unsold = b.cost > 0 ? b.bookValue / b.cost : 0
+  const key = `${b.x},${b.y}`
+  const landCost = world.parcels[key]?.cost ?? 0
+
+  const proceeds = buildingValue(world, b) * RE.condoPremium * unsold * share
+  const cost = b.bookValue * share + landCost * unsold * share
   firm.cash += proceeds
-  b.bookValue -= cost
+  b.bookValue -= b.bookValue * share
   b.saleTicksLeft--
   book(world, firm.id, 'realestate', 'condo_sales', proceeds)
   book(world, firm.id, 'realestate', 'condo_cost', -cost)
+  repayBuildingLoans(world, firm, b.id, share)
   if (b.saleTicksLeft > 0) return
 
-  // The land goes to the buyers along with the units.
+  // The land goes to the buyers along with the last homes.
   b.status = 'sold'
-  const key = `${b.x},${b.y}`
-  const parcel = world.parcels[key]
-  if (parcel) {
-    book(world, firm.id, 'realestate', 'condo_cost', -parcel.cost)
-    delete world.parcels[key]
-  }
+  delete world.parcels[key]
 }
 
 function collectRent(world: World, firm: Firm, b: Building) {

@@ -1,7 +1,17 @@
 // @ts-expect-error Node strip-types tests require the source extension.
 import { PARAMS, TICKS_PER_YEAR, TILE_AREA_M2, TILES_PER_CHUNK } from './params.ts'
+import {
+  annuity,
+  annualDebtService,
+  annualEbitda,
+  book,
+  collateralRoom,
+  findFirm,
+  newLoan,
+  repayBuildingLoans,
+  spread,
 // @ts-expect-error Node strip-types tests require the source extension.
-import { annuity, annualDebtService, annualEbitda, book, collateralRoom, findFirm, newLoan, spread } from './finance.ts'
+} from './finance.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { lvAtTile } from './landvalue.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
@@ -204,7 +214,7 @@ export function develop(
     mode,
     floorArea,
     status: 'construction',
-    ticksLeft: RE.buildTicks[use],
+    ticksLeft: RE.buildTicks[use] + Math.round(floorArea / RE.buildM2PerTick),
     cost,
     costPaid: upfront,
     bookValue: upfront,
@@ -225,19 +235,24 @@ export function sellBuilding(world: World, firmId: string, buildingId: string): 
   const parcel = world.parcels[`${b.x},${b.y}`]
   firm.cash += price
   book(world, firmId, 'realestate', 'sale_gain', price - b.bookValue - (parcel?.cost ?? 0))
+  repayBuildingLoans(world, firm, b.id, 1)
   b.owner = 'market'
   b.status = 'sold'
   delete world.parcels[`${b.x},${b.y}`]
   return ok(price)
 }
 
-export type BorrowRequest = { amount: number; years: number; graceYears?: number; lineId?: string }
+// A project loan names the line or the building under construction it pays
+// for; anything else is a corporate loan against collateral.
+export type BorrowRequest = { amount: number; years: number; graceYears?: number; lineId?: string; buildingId?: string }
 
 export function borrow(world: World, firmId: string, req: BorrowRequest): Result<string> {
   const firm = findFirm(world, firmId)
   if (!firm) return fail('unknown_firm')
   if (!(req.amount > 0)) return fail('invalid_amount')
-  if (!(F.loanYears as readonly number[]).includes(req.years)) return fail('invalid_term')
+  const isProject = Boolean(req.lineId || req.buildingId)
+  const terms: readonly number[] = isProject ? F.projectLoanYears : F.loanYears
+  if (!terms.includes(req.years)) return fail(isProject ? 'invalid_project_term' : 'invalid_term')
   const grace = req.graceYears ?? 0
   if (grace < 0 || grace > F.maxGraceYears) return fail('invalid_grace')
   const rate = F.baseRate + spread(firm.rating)
@@ -247,7 +262,15 @@ export function borrow(world: World, firmId: string, req: BorrowRequest): Result
     if (line.stage !== 'approved' && line.stage !== 'construction') return fail('line_not_approved')
     const drawn = firm.loans.filter((l) => l.lineId === line.id).reduce((s, l) => s + l.principal, 0)
     if (drawn + req.amount > projectCost(line) * F.projectMaxShare) return fail('exceeds_project_share')
-    return ok(newLoan(world, firm, 'project', req.amount, rate + F.projectPremium, req.years, grace, line.id).id)
+    return ok(newLoan(world, firm, 'project', req.amount, rate + F.projectPremium, req.years, grace, { lineId: line.id }).id)
+  }
+  if (req.buildingId) {
+    const b = world.buildings.find((x) => x.id === req.buildingId)
+    if (!b || b.owner !== firmId) return fail('unknown_building')
+    if (b.status !== 'construction') return fail('not_under_construction')
+    const drawn = firm.loans.filter((l) => l.buildingId === b.id).reduce((s, l) => s + l.principal, 0)
+    if (drawn + req.amount > b.cost * F.projectMaxShare) return fail('exceeds_building_share')
+    return ok(newLoan(world, firm, 'project', req.amount, rate + F.projectPremium, req.years, grace, { buildingId: b.id }).id)
   }
   if (grace > 0) return fail('grace_only_for_projects')
   if (req.amount > collateralRoom(world, firm, (b) => buildingValue(world, b))) return fail('exceeds_collateral')

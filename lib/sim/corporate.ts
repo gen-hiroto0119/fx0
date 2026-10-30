@@ -8,6 +8,7 @@ import {
   landMarketValue,
   newLoan,
   ratingFor,
+  repayBuildingLoans,
   spread,
 // @ts-expect-error Node strip-types tests require the source extension.
 } from './finance.ts'
@@ -19,9 +20,23 @@ import type { Firm, World } from './types.ts'
 
 const F = PARAMS.finance
 
+// Revenue the market expects to come back every year; one-off condo and asset
+// sales are left out of growth.
+const RECURRING_REVENUE = new Set(['fare', 'rent'])
+
+const RATING_ORDER = F.ratings.map((r) => r.name as string)
+
 function worse(a: string, b: string): string {
-  const order = F.ratings.map((r) => r.name as string)
-  return order[Math.max(order.indexOf(a), order.indexOf(b))]
+  return RATING_ORDER[Math.max(RATING_ORDER.indexOf(a), RATING_ORDER.indexOf(b))]
+}
+
+// Agencies move a rating one notch at a time, so a single good or bad year
+// does not swing it from end to end.
+function oneNotchToward(current: string, target: string): string {
+  const from = RATING_ORDER.indexOf(current)
+  const to = RATING_ORDER.indexOf(target)
+  if (from < 0) return target
+  return RATING_ORDER[from + Math.sign(to - from)]
 }
 
 function bookAssets(world: World, firm: Firm): number {
@@ -52,7 +67,10 @@ export function closeQuarter(world: World, firm: Firm): Quarter {
   const equity = assets - debt(firm)
   const equityRatio = assets > 0 ? equity / assets : 0
   const leverage = netDebt <= 0 ? 0 : ebitda > 0 ? netDebt / ebitda : Infinity
-  const rating = ebitda > 0 || netDebt <= 0 ? ratingFor(leverage, equityRatio) : worse(ratingFor(0, equityRatio), 'BBB')
+  // With nothing earning yet, a firm is rated no better than A, or BBB once it
+  // borrows; cash it holds is likely a loan waiting to pay for construction.
+  const deserved = ebitda > 0 ? ratingFor(leverage, equityRatio) : worse(ratingFor(0, equityRatio), debt(firm) > 0 ? 'BBB' : 'A')
+  const rating = oneNotchToward(firm.rating, deserved)
   if (rating !== firm.rating) {
     world.events.push({ tick: world.tick, type: 'rating_changed', actor: firm.id, importance: 3, payload: { from: firm.rating, to: rating } })
   }
@@ -60,16 +78,17 @@ export function closeQuarter(world: World, firm: Firm): Quarter {
 
   const netIncome = annualized(world, firm.id, TICKS_PER_YEAR, () => true)
   const roe = equity > 0 ? netIncome / equity : 0
-  const revenue = (from: number, to: number) =>
+  const recurring = (from: number, to: number) =>
     world.ledger
-      .filter((e) => e.firm === firm.id && e.pl && e.amount > 0 && e.tick >= from && e.tick < to)
+      .filter((e) => e.firm === firm.id && RECURRING_REVENUE.has(e.account) && e.tick >= from && e.tick < to)
       .reduce((s, e) => s + e.amount, 0)
-  const recent = revenue(world.tick - TICKS_PER_YEAR, world.tick + 1)
-  const prior = revenue(world.tick - 2 * TICKS_PER_YEAR, world.tick - TICKS_PER_YEAR)
+  const recent = recurring(world.tick - TICKS_PER_YEAR, world.tick + 1)
+  const prior = recurring(world.tick - 2 * TICKS_PER_YEAR, world.tick - TICKS_PER_YEAR)
   const growth = prior > 0 ? recent / prior - 1 : 0
   const pbr = Math.max(F.pbr.min, Math.min(F.pbr.max, 1 + F.pbr.roe * roe + F.pbr.growth * growth))
   firm.nav = marketNav(world, firm)
-  firm.marketCap = Math.max(0, firm.nav) * pbr
+  const target = Math.max(0, firm.nav) * pbr
+  firm.marketCap = firm.marketCap > 0 ? firm.marketCap + F.pbr.quarterlyPull * (target - firm.marketCap) : target
   return { rating, ebitda, netDebt, equityRatio, nav: firm.nav, pbr }
 }
 
@@ -95,6 +114,7 @@ export function handleShortfall(world: World, firm: Firm) {
     const price = buildingValue(world, b) * F.forcedSaleShare
     firm.cash += price
     book(world, firm.id, 'realestate', 'forced_sale_loss', price - b.bookValue)
+    repayBuildingLoans(world, firm, b.id, 1)
     b.owner = 'market'
     b.status = 'sold'
     delete world.parcels[`${b.x},${b.y}`]

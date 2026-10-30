@@ -53,7 +53,8 @@ export function annualized(world: World, firm: string, ticks: number, include: (
   return covered > 0 ? (sum * TICKS_PER_YEAR) / covered : 0
 }
 
-const NON_CASH = new Set(['rail_dep', 're_dep', 'interest', 'condo_cost'])
+// Condo cost stays in: it is the cost of the homes sold, paid in cash earlier.
+const NON_CASH = new Set(['rail_dep', 're_dep', 'interest'])
 
 export function annualEbitda(world: World, firm: string): number {
   return annualized(world, firm, TICKS_PER_YEAR, (e) => !NON_CASH.has(e.account))
@@ -111,7 +112,7 @@ export function newLoan(
   rate: number,
   years: number,
   graceYears: number,
-  lineId?: string,
+  project: { lineId?: string; buildingId?: string } = {},
 ) {
   const loan: Loan = {
     id: `loan${world.nextId++}`,
@@ -122,12 +123,25 @@ export function newLoan(
     termTicks: Math.round(years * TICKS_PER_YEAR),
     graceTicks: Math.round(graceYears * TICKS_PER_YEAR),
     ageTicks: 0,
-    lineId,
+    ...project,
   }
   firm.loans.push(loan)
   firm.cash += amount
   book(world, firm.id, 'corporate', 'loan_drawdown', amount, false)
   return loan
+}
+
+// Repays part of the loans that financed a building, from the money its sale
+// brought in. `share` is the part of the building sold now (1 for all of it).
+export function repayBuildingLoans(world: World, firm: Firm, buildingId: string, share: number) {
+  for (const loan of firm.loans) {
+    if (loan.buildingId !== buildingId) continue
+    const principal = loan.balance * share
+    loan.balance -= principal
+    firm.cash -= principal
+    book(world, firm.id, 'corporate', 'loan_repayment', -principal, false)
+  }
+  firm.loans = firm.loans.filter((l) => l.balance > 1)
 }
 
 export function ratingFor(debtToEbitda: number, equityRatio: number): string {

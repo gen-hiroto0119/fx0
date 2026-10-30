@@ -51,6 +51,12 @@ const OVERLAYS: { id: Overlay; label: string }[] = [
   { id: 'traffic', label: '道路の混雑' },
 ]
 
+// Construction loans: condos repay from their sales, rentals need time to fill up.
+const BUILDING_LOAN = {
+  sale: { years: 10, graceYears: 2 },
+  lease: { years: 20, graceYears: 1 },
+} as const
+
 // The most floor the zoning allows on one tile, scaled by the chosen share.
 function plannedFloor(world: World, tile: Tile, plan: DevelopPlan): number {
   const c = chunkAt(world, tile.x, tile.y)
@@ -117,7 +123,17 @@ export default function Game() {
     if (tool === 'develop') {
       const floor = plannedFloor(world, tile, developPlan)
       const result = develop(world, PLAYER, tile.x, tile.y, developPlan.use, floor, developPlan.mode)
-      commit(result.ok ? `${USE_LABEL[developPlan.use]}(${floor.toLocaleString('ja-JP')}㎡)に着工しました` : errorLabel(result.error))
+      if (!result.ok) {
+        commit(errorLabel(result.error))
+        return
+      }
+      let note = ''
+      if (projectLoan) {
+        const cost = floor * PARAMS.realEstate.yenPerM2[developPlan.use]
+        const loan = borrow(world, PLAYER, { ...BUILDING_LOAN[developPlan.mode], amount: cost * 0.7, buildingId: result.value })
+        note = loan.ok ? `、建築費の70%を借入` : `、借入できず: ${errorLabel(loan.error)}`
+      }
+      commit(`${USE_LABEL[developPlan.use]}(${floor.toLocaleString('ja-JP')}㎡)に着工しました${note}`)
     }
   }
 
@@ -133,7 +149,7 @@ export default function Game() {
     applyForLine(world, PLAYER, line.id)
     grantLine(world, line.id)
     if (projectLoan) {
-      const loan = borrow(world, PLAYER, { amount: projectCost(line) * 0.7, years: 20, graceYears: 3, lineId: line.id })
+      const loan = borrow(world, PLAYER, { amount: projectCost(line) * 0.7, years: 30, graceYears: 3, lineId: line.id })
       if (!loan.ok) setMessage(errorLabel(loan.error))
     }
     startConstruction(world, PLAYER, line.id)
@@ -232,7 +248,7 @@ export default function Game() {
                 <p className="text-muted-foreground">地図をクリックして駅を順に置きます。置いた駅: {draft.length}</p>
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={projectLoan} onChange={(e) => setProjectLoan(e.target.checked)} />
-                  建設費と車両費の70%をプロジェクト融資で借りる(20年・据置3年)
+                  建設費と車両費の70%をプロジェクト融資で借りる(30年・据置3年)
                 </label>
                 <div className="flex gap-2">
                   <Button size="sm" onClick={confirmLine} disabled={draft.length < 2}>
@@ -283,7 +299,16 @@ export default function Game() {
                     <option value="lease">賃貸</option>
                   </select>
                 </label>
-                <p className="col-span-3">自社の土地をクリックすると着工します。</p>
+                <label className="col-span-3 flex items-center gap-2 text-foreground">
+                  <input type="checkbox" checked={projectLoan} onChange={(e) => setProjectLoan(e.target.checked)} />
+                  建築費の70%を借りる(分譲は10年・据置2年、賃貸は20年・据置1年)
+                </label>
+                <p className="col-span-3">
+                  {selected
+                    ? `このマスの建築費 ${formatOku(plannedFloor(world, selected, developPlan) * PARAMS.realEstate.yenPerM2[developPlan.use])}(着工時に30%、竣工時に残りを支払い)。`
+                    : ''}
+                  自社の土地をクリックすると着工します。
+                </p>
               </div>
             ) : null}
           </Section>

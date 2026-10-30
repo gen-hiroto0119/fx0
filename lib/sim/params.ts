@@ -87,10 +87,10 @@ export const PARAMS = {
   },
   // Rail
   rail: {
-    trackYenPerKm: 30 * OKU,
+    trackYenPerKm: 20 * OKU, // a surface suburban line; tunnels and bridges come from terrainMult
     terrainMult: { plain: 1, hill: 1.3, river: 2.5, sea: 2.5, mountain: 2.5 } as const,
-    stationYen: 10 * OKU,
-    expressStationYen: 25 * OKU,
+    stationYen: 8 * OKU,
+    expressStationYen: 20 * OKU,
     carYen: 1.8 * OKU,
     carCapacity: 140,
     cruiseKmh: 70,
@@ -115,9 +115,12 @@ export const PARAMS = {
   },
   // Real estate
   realEstate: {
-    baseRentYenPerM2Month: { res: 2_500, office: 4_000, retail: 4_500, industry: 1_200 } as const,
-    yenPerM2: { res: 300_000, office: 400_000, retail: 350_000, industry: 150_000, station: 450_000 } as const,
+    // Rents at the reference land value, near suburban levels in Japan.
+    baseRentYenPerM2Month: { res: 2_400, office: 2_800, retail: 2_600, industry: 900 } as const,
+    // Construction cost per m2 of floor, at recent Japanese levels.
+    yenPerM2: { res: 450_000, office: 500_000, retail: 400_000, industry: 200_000, station: 500_000 } as const,
     buildTicks: { res: 12, office: 16, retail: 12, industry: 12, station: 20 } as const,
+    buildM2PerTick: 5_000, // larger buildings take longer on top of the base time
     upfrontShare: 0.3,
     opexShare: 0.25,
     propertyTaxRate: 0.014,
@@ -125,12 +128,15 @@ export const PARAMS = {
     capCityRisk: 0.005,
     capAgePerYear: 0.0002,
     capStationNear: 0.003,
+    capUsePremium: { res: 0, office: 0.003, retail: 0.008, industry: 0.015 } as const, // shops and factories are riskier to own
     naturalVacancy: 0.05,
-    rentAdjust: 0.02,
-    rentMultRange: [0.5, 2] as const,
+    rentAdjust: 0.002, // weekly change per natural-vacancy gap; about 10% a year when nothing is vacant
+    rentMaxStepPerTick: 0.004, // about ±20% a year at most
+    rentMultRange: [0.6, 1.8] as const,
     leaseUpPerTick: 0.08,
     buildingLifeYears: 40,
-    condoSaleTicks: 8,
+    condoSaleTicks: 8, // at least this long, however small
+    condoSaleM2PerTick: 2_000, // about 25 homes a week find buyers
     condoPremium: 1.1,
     stationRentMult: 1.3,
     stationRentBoardingsScale: 50_000, // daily boardings that double a station building's rent
@@ -146,16 +152,21 @@ export const PARAMS = {
     dscr: 1.2,
     overdraftPremium: 0.08,
     forcedSaleShare: 0.7,
+    // Net debt to EBITDA by rating, at the levels of Japanese railway and
+    // property groups, which hold A ratings at 7-10 times.
     ratings: [
-      { name: 'AAA', debtToEbitda: 2, equityRatio: 0.5, spread: 0.002 },
-      { name: 'A', debtToEbitda: 4, equityRatio: 0.35, spread: 0.006 },
-      { name: 'BBB', debtToEbitda: 6, equityRatio: 0.25, spread: 0.012 },
-      { name: 'BB', debtToEbitda: 8, equityRatio: 0.15, spread: 0.025 },
+      { name: 'AAA', debtToEbitda: 4, equityRatio: 0.4, spread: 0.002 },
+      { name: 'A', debtToEbitda: 8, equityRatio: 0.25, spread: 0.006 },
+      { name: 'BBB', debtToEbitda: 11, equityRatio: 0.15, spread: 0.012 },
+      { name: 'BB', debtToEbitda: 14, equityRatio: 0.08, spread: 0.025 },
       { name: 'B', debtToEbitda: Infinity, equityRatio: -Infinity, spread: 0.045 },
     ],
-    pbr: { roe: 3, growth: 2, min: 0.3, max: 3 },
+    // Price to book: ROE and growth of recurring revenue (fares and rents), and
+    // the market cap moves part of the way toward that price each quarter.
+    pbr: { roe: 3, growth: 2, min: 0.5, max: 2.5, quarterlyPull: 0.3 },
     startingCash: 300 * OKU,
     loanYears: [5, 10, 20] as const,
+    projectLoanYears: [10, 20, 30] as const, // lines and buildings repay from what they earn, over longer terms
     maxGraceYears: 3,
     overdraftMin: 10 * OKU,
   },

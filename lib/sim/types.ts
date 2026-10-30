@@ -132,7 +132,8 @@ export type Loan = {
   termTicks: number
   graceTicks: number
   ageTicks: number
-  lineId?: string
+  lineId?: string // project loans name what they financed
+  buildingId?: string
 }
 
 export type Firm = {
