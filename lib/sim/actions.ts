@@ -1,7 +1,7 @@
 // @ts-expect-error Node strip-types tests require the source extension.
-import { PARAMS, TILE_AREA_M2 } from './params.ts'
+import { PARAMS, TICKS_PER_YEAR, TILE_AREA_M2, TILES_PER_CHUNK } from './params.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
-import { annualDebtService, annualEbitda, book, collateralRoom, firmById, newLoan, spread } from './finance.ts'
+import { annuity, annualDebtService, annualEbitda, book, collateralRoom, findFirm, newLoan, spread } from './finance.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { lvAtTile } from './landvalue.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
@@ -32,7 +32,7 @@ export function landPrice(world: World, firmId: string, x: number, y: number): n
   const recent = c.purchases
     .filter((p) => p.firm === firmId && p.tick > world.tick - L.rumorWindow)
     .reduce((s, p) => s + p.tiles, 0)
-  return lvAtTile(world, x, y) * TILE_AREA_M2 * (1 + L.kappa * (recent / 256))
+  return lvAtTile(world, x, y) * TILE_AREA_M2 * (1 + L.kappa * (recent / TILES_PER_CHUNK))
 }
 
 export function buyLand(world: World, firmId: string, x: number, y: number): Result<number> {
@@ -41,7 +41,8 @@ export function buyLand(world: World, firmId: string, x: number, y: number): Res
   if (kind === 'sea' || kind === 'river' || kind === 'mountain') return fail('not_buildable')
   const key = `${x},${y}`
   if (world.parcels[key]) return fail('already_owned')
-  const firm = firmById(world, firmId)
+  const firm = findFirm(world, firmId)
+  if (!firm) return fail('unknown_firm')
   const price = landPrice(world, firmId, x, y)
   if (firm.cash < price) return fail('insufficient_cash')
   firm.cash -= price
@@ -52,7 +53,7 @@ export function buyLand(world: World, firmId: string, x: number, y: number): Res
   c.purchases.push({ tick: world.tick, firm: firmId, tiles: 1 })
   c.purchases = c.purchases.filter((p) => p.tick > world.tick - L.rumorWindow)
   const bought = c.purchases.filter((p) => p.firm === firmId).reduce((s, p) => s + p.tiles, 0)
-  if (bought / 256 > L.rumorShare && c.rumorUntil <= world.tick) {
+  if (bought / TILES_PER_CHUNK > L.rumorShare && c.rumorUntil <= world.tick) {
     c.rumorUntil = world.tick + L.rumorTicks
     world.events.push({ tick: world.tick, type: 'land_rumor', actor: firmId, x, y, importance: 3 })
   }
@@ -62,6 +63,7 @@ export function buyLand(world: World, firmId: string, x: number, y: number): Res
 export const DEFAULT_SERVICE: Service = { localPeak: 10, localOff: 6, expressPeak: 0, expressOff: 0, cars: 6, fareMult: 1 }
 
 export function planLine(world: World, firmId: string, name: string, stations: Station[]): Result<Line> {
+  if (!findFirm(world, firmId)) return fail('unknown_firm')
   if (stations.length < 2) return fail('need_two_stations')
   for (const s of stations) {
     if (!inBounds(world, s.x, s.y)) return fail('out_of_bounds')
@@ -139,9 +141,12 @@ export function setService(world: World, firmId: string, lineId: string, service
   const line = lineOf(world, firmId, lineId)
   if (!line) return fail('unknown_line')
   const next = { ...line.service, ...service }
-  if (next.fareMult < 0.7 || next.fareMult > 1.3) return fail('fare_out_of_range')
-  if (next.cars < 1 || next.cars > 12) return fail('cars_out_of_range')
-  if ([next.localPeak, next.localOff, next.expressPeak, next.expressOff].some((v) => v < 0 || v > 30)) return fail('frequency_out_of_range')
+  const limits = PARAMS.rail.serviceLimits
+  const within = (v: number, [lo, hi]: readonly [number, number]) => v >= lo && v <= hi
+  if (!within(next.fareMult, limits.fareMult)) return fail('fare_out_of_range')
+  if (!within(next.cars, limits.cars)) return fail('cars_out_of_range')
+  const frequencies = [next.localPeak, next.localOff, next.expressPeak, next.expressOff]
+  if (!frequencies.every((v) => within(v, limits.trainsPerHour))) return fail('frequency_out_of_range')
   line.service = next
   if (line.stage === 'open') ensureCars(world, line)
   return ok(undefined)
@@ -179,10 +184,11 @@ export function develop(
   }
   const c = chunkAt(world, x, y)
   const zoneUse = use === 'station' ? 'retail' : use
-  const far = Math.max(c.zoneFar[zoneUse], use === 'station' ? 4 : 0)
+  const far = Math.max(c.zoneFar[zoneUse], use === 'station' ? RE.stationBuildingFar : 0)
   if (far <= 0) return fail('zoning_forbids_use')
   if (floorArea <= 0 || floorArea > far * TILE_AREA_M2) return fail('exceeds_far')
-  const firm = firmById(world, firmId)
+  const firm = findFirm(world, firmId)
+  if (!firm) return fail('unknown_firm')
   const cost = floorArea * RE.yenPerM2[use]
   const upfront = cost * RE.upfrontShare
   if (firm.cash < upfront) return fail('insufficient_cash')
@@ -213,7 +219,8 @@ export function sellBuilding(world: World, firmId: string, buildingId: string): 
   const b = world.buildings.find((x) => x.id === buildingId)
   if (!b || b.owner !== firmId) return fail('unknown_building')
   if (b.status !== 'operating') return fail('not_operating')
-  const firm = firmById(world, firmId)
+  const firm = findFirm(world, firmId)
+  if (!firm) return fail('unknown_firm')
   const price = buildingValue(world, b)
   const parcel = world.parcels[`${b.x},${b.y}`]
   firm.cash += price
@@ -227,11 +234,12 @@ export function sellBuilding(world: World, firmId: string, buildingId: string): 
 export type BorrowRequest = { amount: number; years: number; graceYears?: number; lineId?: string }
 
 export function borrow(world: World, firmId: string, req: BorrowRequest): Result<string> {
-  const firm = firmById(world, firmId)
+  const firm = findFirm(world, firmId)
+  if (!firm) return fail('unknown_firm')
   if (!(req.amount > 0)) return fail('invalid_amount')
-  if (![5, 10, 20].includes(req.years)) return fail('invalid_term')
+  if (!(F.loanYears as readonly number[]).includes(req.years)) return fail('invalid_term')
   const grace = req.graceYears ?? 0
-  if (grace < 0 || grace > 3) return fail('invalid_grace')
+  if (grace < 0 || grace > F.maxGraceYears) return fail('invalid_grace')
   const rate = F.baseRate + spread(firm.rating)
   if (req.lineId) {
     const line = lineOf(world, firmId, req.lineId)
@@ -242,11 +250,8 @@ export function borrow(world: World, firmId: string, req: BorrowRequest): Result
     return ok(newLoan(world, firm, 'project', req.amount, rate + F.projectPremium, req.years, grace, line.id).id)
   }
   if (grace > 0) return fail('grace_only_for_projects')
-  if (req.amount > collateralRoom(world, firm, (id) => buildingValue(world, world.buildings.find((b) => b.id === id)!))) {
-    return fail('exceeds_collateral')
-  }
-  const r = rate / 52
-  const yearly = (req.amount * r) / (1 - (1 + r) ** -(req.years * 52)) * 52
+  if (req.amount > collateralRoom(world, firm, (b) => buildingValue(world, b))) return fail('exceeds_collateral')
+  const yearly = annuity(req.amount, rate / TICKS_PER_YEAR, req.years * TICKS_PER_YEAR) * TICKS_PER_YEAR
   if (annualDebtService(firm) + yearly > annualEbitda(world, firmId) / F.dscr) return fail('exceeds_debt_service')
   return ok(newLoan(world, firm, 'corporate', req.amount, rate, req.years, 0).id)
 }

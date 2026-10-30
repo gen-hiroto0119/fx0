@@ -4,6 +4,7 @@
 export const TILE_M = 200
 export const CHUNK_TILES = 16
 export const TILE_AREA_M2 = TILE_M * TILE_M
+export const TILES_PER_CHUNK = CHUNK_TILES * CHUNK_TILES
 export const TICKS_PER_YEAR = 52
 export const TICKS_PER_QUARTER = 13
 
@@ -24,6 +25,12 @@ export const PARAMS = {
     stagePlanP: { planned: 0, applied: 0.4, approved: 0.8, construction: 0.95, open: 1 } as const,
     stationBonus: 0.6,
     stationDecayM: 400,
+    stationQualityBoardings: 20_000, // daily boardings at which a station gives its full lift
+    stationQualityRange: [0.3, 1.5] as const,
+    plannedStationBoardings: 10_000, // assumed for stations that are not open yet
+    momentumWindow: 13, // ticks of population growth that move prices
+    momentumGain: 4,
+    momentumRange: [-0.2, 0.3] as const,
   },
   // City growth (simplified Lowry model)
   growth: {
@@ -39,6 +46,15 @@ export const PARAMS = {
     bgDevMin: 2_000,
     bgDevUnmetShare: 0.1, // share of unmet demand local developers build per tick
     shoppingTripsPerResident: 0.3,
+    // Where people and jobs want to be
+    rentElasticity: -0.3,
+    industryRentElasticity: -0.5,
+    officeClusterJobs: 20_000, // office jobs at which clustering starts to pay off
+    officeClusterExponent: 0.3,
+    retailBoardingsScale: 20_000, // daily station boardings that double retail demand
+    portIndustryBonus: 2,
+    useShareOfBuildable: 0.3, // share of a chunk's buildable land one use can take
+    environment: { view: 0.2, industry: -0.3, retail: 0.1, retailJobsForFullBonus: 5_000 } as const,
   },
   // Transport
   traffic: {
@@ -51,10 +67,12 @@ export const PARAMS = {
     captiveMaxTimeRatio: 1.5, // no-car travellers use rail only when it is not far slower than driving
     carYenPerKm: 15,
     parkingYenCore: 400, // commutes into a city's office core
+    parkingCoreOfficeFar: 6, // office FAR that marks a city core with paid parking
     carOccupancy: 1.3,
     peakHourShare: 0.1,
     intraChunkMin: 6,
     intraChunkKm: 1.6,
+    accessDistanceFactor: 0.7, // residents live closer to a station than the chunk centre does
     walkMPerMin: 80,
     feederWaitMin: 6,
     feederMPerMin: 250,
@@ -93,6 +111,7 @@ export const PARAMS = {
     crowdingPenaltyMin: 10,
     buildTicksPerKm: 1.5,
     buildTicksMin: 12,
+    serviceLimits: { fareMult: [0.7, 1.3], cars: [1, 12], trainsPerHour: [0, 30] } as const,
   },
   // Real estate
   realEstate: {
@@ -108,11 +127,15 @@ export const PARAMS = {
     capStationNear: 0.003,
     naturalVacancy: 0.05,
     rentAdjust: 0.02,
+    rentMultRange: [0.5, 2] as const,
     leaseUpPerTick: 0.08,
     buildingLifeYears: 40,
     condoSaleTicks: 8,
     condoPremium: 1.1,
     stationRentMult: 1.3,
+    stationRentBoardingsScale: 50_000, // daily boardings that double a station building's rent
+    stationNearM: 800, // buildings this close to an open station get a lower cap rate
+    stationBuildingFar: 4,
   },
   // Finance
   finance: {
@@ -132,6 +155,9 @@ export const PARAMS = {
     ],
     pbr: { roe: 3, growth: 2, min: 0.3, max: 3 },
     startingCash: 300 * OKU,
+    loanYears: [5, 10, 20] as const,
+    maxGraceYears: 3,
+    overdraftMin: 10 * OKU,
   },
 } as const
 

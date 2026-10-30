@@ -1,15 +1,15 @@
 // @ts-expect-error Node strip-types tests require the source extension.
 import { CHUNK_TILES, PARAMS, TILE_AREA_M2 } from './params.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
-import { buildableM2, computeAccess, popWeightedAccess } from './growth.ts'
+import { applyAccessibility, buildableM2, computeAccessibility, popWeightedAccess } from './growth.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
-import { updateLandValue } from './landvalue.ts'
+import { computeLandValues } from './landvalue.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { buildRoads } from './network.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { generateTerrain, placeCities } from './terrain.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
-import { runTraffic } from './traffic.ts'
+import { applyTraffic, computeTraffic } from './traffic.ts'
 import type { Chunk, City, PerUse, World } from './types.ts'
 
 const G = PARAMS.growth
@@ -20,6 +20,15 @@ const CITY_POP: Record<string, number> = { A: 120_000, B: 180_000, C: 40_000 }
 const OFFICE_SHARE: Record<string, number> = { A: 0.35, B: 0.5, C: 0.15 }
 const INDUSTRY_SHARE: Record<string, number> = { A: 0.7, B: 0.3, C: 0 }
 const CITY_SCALE: Record<string, number> = { A: 1, B: 1, C: 1.5 } // C is a small town
+
+// Initial zoning by distance from the city centre, in chunks (FAR per use).
+const CITY_RADIUS = 2.6
+const CORE = { radius: 0.9, far: { res: 3, office: 6, retail: 6, industry: 0 } }
+const RING = { radius: 1.8, far: { res: 2, office: 1, retail: 2, industry: 0 } }
+const OUTER = { far: { res: 1, office: 0, retail: 0.5, industry: 0 } }
+const PLAIN_CITY_RING_INDUSTRY = 0.8
+const PORT_INDUSTRY = { radius: 2, far: 1 }
+const MIN_SETTLED_TILES = 8
 
 function median(xs: number[]): number {
   const s = [...xs].sort((a, b) => a - b)
@@ -84,7 +93,7 @@ function makeChunks(world: World): Chunk[] {
 function zoneAndSettle(world: World) {
   const port = world.terrain.resources.find((r) => r.kind === 'port')
   for (const c of world.chunks) {
-    if (c.buildableM2 < TILE_AREA_M2 * 8) continue
+    if (c.buildableM2 < TILE_AREA_M2 * MIN_SETTLED_TILES) continue
     let best: City | null = null
     let bestD = Infinity
     for (const city of world.cities) {
@@ -94,13 +103,13 @@ function zoneAndSettle(world: World) {
         best = city
       }
     }
-    if (!best || bestD >= 2.6) continue
+    if (!best || bestD >= CITY_RADIUS) continue
     c.cityId = best.id
-    const nearPort = port ? Math.hypot(port.x / CHUNK_TILES - (c.cx + 0.5), port.y / CHUNK_TILES - (c.cy + 0.5)) < 2 : false
-    if (bestD < 0.9) c.zoneFar = { res: 3, office: 6, retail: 6, industry: 0 }
-    else if (bestD < 1.8) c.zoneFar = { res: 2, office: 1, retail: 2, industry: best.id === 'B' ? 0.8 : 0 }
-    else c.zoneFar = { res: 1, office: 0, retail: 0.5, industry: 0 }
-    if (best.id === 'A' && nearPort && bestD >= 0.9) c.zoneFar.industry = 1
+    const portDistance = port ? Math.hypot(port.x / CHUNK_TILES - (c.cx + 0.5), port.y / CHUNK_TILES - (c.cy + 0.5)) : Infinity
+    if (bestD < CORE.radius) c.zoneFar = { ...CORE.far }
+    else if (bestD < RING.radius) c.zoneFar = { ...RING.far, industry: best.id === 'B' ? PLAIN_CITY_RING_INDUSTRY : 0 }
+    else c.zoneFar = { ...OUTER.far }
+    if (best.id === 'A' && portDistance < PORT_INDUSTRY.radius && bestD >= CORE.radius) c.zoneFar.industry = PORT_INDUSTRY.far
   }
 
   for (const city of world.cities) {
@@ -184,13 +193,17 @@ export function createWorld(seed: number, size = 128): World {
   }
 
   // Calibrate the reference values so today's land prices sit near the base.
-  const traffic = runTraffic(world)
-  computeAccess(world, traffic.minutes)
+  const traffic = computeTraffic(world)
+  applyTraffic(world, traffic)
+  applyAccessibility(world, computeAccessibility(world.chunks, traffic.minutes))
   const settled = world.chunks.filter((c) => c.pop > 0)
   world.region.accessRef = median(settled.map((c) => c.access))
-  world.region.meanAccess0 = popWeightedAccess(world)
-  updateLandValue(world, traffic.minutes)
-  for (const c of world.chunks) c.lv = c.lvTarget
+  world.region.meanAccess0 = popWeightedAccess(world.chunks)
+  const landValues = computeLandValues(world, traffic.minutes)
+  world.chunks.forEach((c, i) => {
+    c.lvTarget = landValues[i].lvTarget
+    c.lv = landValues[i].lvTarget
+  })
   world.region.lvRef = median(settled.map((c) => c.lv))
   world.region.popHistory.push(world.chunks.reduce((s, c) => s + c.pop, 0))
   return world

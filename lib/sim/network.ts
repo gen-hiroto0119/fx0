@@ -101,14 +101,14 @@ export function dijkstra(
 
 export type CarMatrix = { minutes: number[][]; km: number[][]; pred: number[][] }
 
-export function carMatrix(world: World): CarMatrix {
-  const n = world.chunks.length
+export function carMatrix(roads: RoadEdge[], chunkCount: number): CarMatrix {
+  const n = chunkCount
   const minutes: number[][] = []
   const km: number[][] = []
   const pred: number[][] = []
   for (let s = 0; s < n; s++) {
-    const t = dijkstra(n, world.roads, s, edgeMinutes)
-    const d = dijkstra(n, world.roads, s, (e) => e.km)
+    const t = dijkstra(n, roads, s, edgeMinutes)
+    const d = dijkstra(n, roads, s, (e) => e.km)
     for (let j = 0; j < n; j++) if (j !== s) t.dist[j] += 2 * T.carTerminalMin
     t.dist[s] = T.intraChunkMin
     d.dist[s] = T.intraChunkKm
@@ -163,16 +163,23 @@ function dayAverage(peak: number, off: number): number {
   return (peak * R.peakHours + off * R.offHours) / (R.peakHours + R.offHours)
 }
 
+// Passengers arrive at random, so they wait half the headway on average.
+function averageWaitMinutes(trainsPerHour: number): number {
+  return 60 / trainsPerHour / 2
+}
+
 export type StationAccess = { line: number; station: number; minutes: number; yen: number }
 
 // Stations a chunk's residents can reach: walk, or a feeder bus when walking is slow.
-export function stationAccess(world: World, chunk: Chunk): StationAccess[] {
+// Only lines that are open in `lines` count.
+export function stationAccess(lines: Line[], chunk: Chunk): StationAccess[] {
   const [cx, cy] = chunkCenterM(chunk)
   const out: StationAccess[] = []
-  world.lines.forEach((line, li) => {
+  lines.forEach((line, li) => {
     if (line.stage !== 'open') return
     line.stations.forEach((s, si) => {
-      const d = Math.hypot((s.x + 0.5) * TILE_M - cx, (s.y + 0.5) * TILE_M - cy) * 0.7
+      const centreDistance = Math.hypot((s.x + 0.5) * TILE_M - cx, (s.y + 0.5) * TILE_M - cy)
+      const d = centreDistance * T.accessDistanceFactor
       const walk = d / T.walkMPerMin
       const feeder = T.feederWaitMin + d / T.feederMPerMin
       const [minutes, yen] = walk <= feeder ? [walk, 0] : [feeder, T.feederFareYen]
@@ -184,13 +191,15 @@ export function stationAccess(world: World, chunk: Chunk): StationAccess[] {
 
 export type RailTrip = { minutes: number; fare: number; accessYen: number; line: number; a: number; b: number; km: number }
 
-export function bestRail(world: World, from: StationAccess[], to: StationAccess[]): RailTrip | null {
+// The cheapest rail trip (time and money) between two sets of reachable stations.
+// Transfers between lines are not modelled yet.
+export function bestRail(lines: Line[], from: StationAccess[], to: StationAccess[]): RailTrip | null {
   let best: RailTrip | null = null
   let bestCost = Infinity
   for (const o of from) {
     for (const d of to) {
       if (o.line !== d.line || o.station === d.station) continue
-      const line = world.lines[o.line]
+      const line = lines[o.line]
       const svc = line.service
       const options: [boolean, number][] = [[false, dayAverage(svc.localPeak, svc.localOff)]]
       const expressStops = line.stations[o.station].express && line.stations[d.station].express
@@ -199,7 +208,11 @@ export function bestRail(world: World, from: StationAccess[], to: StationAccess[
         if (freq <= 0) continue
         const km = rideKm(line, o.station, d.station)
         const minutes =
-          o.minutes + 30 / freq + rideMinutes(line, o.station, d.station, express) + line.crowdingPenaltyMin + d.minutes
+          o.minutes +
+          averageWaitMinutes(freq) +
+          rideMinutes(line, o.station, d.station, express) +
+          line.crowdingPenaltyMin +
+          d.minutes
         const price = fare(line, km)
         const cost = minutes * T.valueOfTimeYenPerMin + price + o.yen + d.yen
         if (cost < bestCost) {

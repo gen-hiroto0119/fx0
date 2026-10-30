@@ -83,7 +83,7 @@ export function handleShortfall(world: World, firm: Firm) {
   firm.shortfallTicks++
   if (firm.shortfallTicks === 1) {
     const monthlyRevenue = (annualized(world, firm.id, 13, (e) => e.amount > 0) / 12) || 0
-    const limit = Math.max(10 * 100_000_000, monthlyRevenue)
+    const limit = Math.max(F.overdraftMin, monthlyRevenue)
     const amount = Math.min(-firm.cash, limit)
     newLoan(world, firm, 'overdraft', amount, F.baseRate + spread(firm.rating) + F.overdraftPremium, 0.25, 0)
     world.events.push({ tick: world.tick, type: 'overdraft', actor: firm.id, importance: 3, payload: { amount } })

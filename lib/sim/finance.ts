@@ -2,12 +2,18 @@
 import { PARAMS, TICKS_PER_YEAR, TILE_AREA_M2 } from './params.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { lvAtTile } from './landvalue.ts'
-import type { Firm, LedgerEntry, Loan, World } from './types.ts'
+import type { Building, Firm, LedgerEntry, Loan, World } from './types.ts'
 
 const F = PARAMS.finance
 
+export function findFirm(world: World, id: string): Firm | undefined {
+  return world.firms.find((x) => x.id === id)
+}
+
+// For ids the simulation itself stored (owners of lines, buildings, parcels).
+// A missing firm there is a bug, not a player mistake, so it throws.
 export function firmById(world: World, id: string): Firm {
-  const f = world.firms.find((x) => x.id === id)
+  const f = findFirm(world, id)
   if (!f) throw new Error(`unknown firm ${id}`)
   return f
 }
@@ -71,9 +77,11 @@ export function landMarketValue(world: World, firm: string): number {
   return v
 }
 
-export function collateralRoom(world: World, firm: Firm, buildingValue: (id: string) => number): number {
+// The building valuation is passed in because it lives in realestate.ts,
+// which itself depends on this module.
+export function collateralRoom(world: World, firm: Firm, buildingValue: (b: Building) => number): number {
   let room = landMarketValue(world, firm.id) * F.ltv.land
-  for (const b of world.buildings) if (b.owner === firm.id && b.status === 'operating') room += buildingValue(b.id) * F.ltv.building
+  for (const b of world.buildings) if (b.owner === firm.id && b.status === 'operating') room += buildingValue(b) * F.ltv.building
   for (const l of world.lines) if (l.owner === firm.id) room += (l.trackBookValue + l.carBookValue) * F.ltv.rail
   return room - debt(firm)
 }
