@@ -53,6 +53,19 @@ function hillshade(dzdx: number, dzdy: number): number {
   return lit / lz // flat ground keeps its base colour
 }
 
+// Lowland plains read greener and raised ground (plateaus, fans) more tan, so
+// plateaus stand out from the valleys cut into them.
+const LOWLAND_TINT_M = [10, 40] as const
+
+function elevationTint(rgb: [number, number, number], kind: TileKind, heightM: number): [number, number, number] {
+  if (kind !== 'plain') return rgb
+  const [lo, hi] = LOWLAND_TINT_M
+  const t = Math.max(0, Math.min(1, (heightM - lo) / (hi - lo)))
+  const lowland: [number, number, number] = [178, 210, 150]
+  const upland: [number, number, number] = [214, 210, 160]
+  return [0, 1, 2].map((c) => lowland[c] + (upland[c] - lowland[c]) * t) as [number, number, number]
+}
+
 // The terrain never changes for a seed, so it is drawn once into a 1px-per-tile image.
 function terrainImage(world: World): HTMLCanvasElement {
   const { size, kind, height } = world.terrain
@@ -63,7 +76,7 @@ function terrainImage(world: World): HTMLCanvasElement {
   const image = ctx.createImageData(size, size)
   const at = (x: number, y: number) => height[Math.min(size - 1, Math.max(0, y)) * size + Math.min(size - 1, Math.max(0, x))]
   for (let i = 0; i < size * size; i++) {
-    const [r, g, b] = TERRAIN_RGB[kind[i]]
+    const [r, g, b] = elevationTint(TERRAIN_RGB[kind[i]], kind[i], height[i])
     const x = i % size
     const y = Math.floor(i / size)
     const dzdx = (at(x + 1, y) - at(x - 1, y)) / (2 * TILE_SPAN_M)

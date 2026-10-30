@@ -31,12 +31,30 @@ const FLOODPLAIN_SLOPE = 1 / 2000
 const DELTA_SLOPE = 1 / 6000
 const DELTA_KM = 2.5
 
+// Plateaus (台地): old fan and terrace surfaces standing above the lowland,
+// like Musashino or Shimousa in the Kanto plain. Rivers cut lowland valleys
+// through them and small streams cut narrow valleys (谷津) into their edges.
+const PLATEAU_SHARE = 0.5 // noise level above which the plain is plateau (lower = more plateau)
+const PLATEAU_RISE_M = [15, 45] as const // height of the plateau surface above the lowland
+const PLATEAU_MAX_UPLIFT = 5 // no plateaus where the mountains are rising
+const VALLEY_MIN_AREA_KM2 = 2.5 // streams this large cut a valley into the plateau
+const VALLEY_HALF_WIDTH_TILES = [
+  { minAreaKm2: 100, tiles: 3 },
+  { minAreaKm2: 20, tiles: 2 },
+  { minAreaKm2: 0, tiles: 0 },
+] as const
+
+// A few metres of bumps on the plain, so small streams join into branching
+// networks instead of running side by side down an even slope.
+const PLAIN_ROUGHNESS_M = 3
+const PLAIN_ROUGHNESS_TILES = 6
+
 const RIVER_MIN_AREA_KM2 = 36
 const SEA_DEPTH_M = -10
 
 // Kinds from height and slope (metres, rise over run).
 const MOUNTAIN = { heightM: 350, slope: 0.3 }
-const HILL = { heightM: 60, slope: 0.1 }
+const HILL = { heightM: 120, slope: 0.1 }
 
 const NEIGHBORS = [
   [1, 0],
@@ -279,10 +297,76 @@ export function generateTerrain(seed: number, size: number): Terrain {
     drainage = computeDrainage(size, height, sea)
   }
 
+  height = fillPits(size, roughenPlain(seed, size, height, sea, uOverK, tilesToSea), sea)
+  drainage = computeDrainage(size, height, sea)
+  height = fillPits(size, raisePlateaus(seed, size, height, sea, drainage, uOverK), sea)
+  drainage = computeDrainage(size, height, sea)
+
   const kind = classify(seed, size, height, sea, drainage)
   const terrain: Terrain = { size, height, kind, resources: [] }
   terrain.resources = placeResources(terrain)
   return terrain
+}
+
+// The delta near the coast stays smooth so river mouths keep their low gradient.
+function roughenPlain(
+  seed: number,
+  size: number,
+  height: number[],
+  sea: boolean[],
+  uOverK: number[],
+  tilesToSea: number[],
+): number[] {
+  const tileKm = TILE_M / 1000
+  return height.map((h, i) => {
+    if (sea[i] || uOverK[i] > PLATEAU_MAX_UPLIFT) return h
+    const inland = smoothstep((tilesToSea[i] * tileKm) / DELTA_KM - 1)
+    const bump = fbm(seed + 5011, (i % size) / PLAIN_ROUGHNESS_TILES, Math.floor(i / size) / PLAIN_ROUGHNESS_TILES, 2) - 0.5
+    return Math.max(0.01, h + 2 * PLAIN_ROUGHNESS_M * bump * inland)
+  })
+}
+
+// Raises plateau surfaces out of the plain, leaving lowland valleys along
+// the streams that cut through them and a one-tile scarp at their edge.
+function raisePlateaus(
+  seed: number,
+  size: number,
+  height: number[],
+  sea: boolean[],
+  drainage: Drainage,
+  uOverK: number[],
+): number[] {
+  // Distance (in tiles) from every tile to the nearest valley-cutting stream,
+  // minus that stream's half-width, so 0 or less means "in the valley".
+  const outsideValley = new Array<number>(size * size).fill(Infinity)
+  const queue: number[] = []
+  for (let i = 0; i < size * size; i++) {
+    const areaKm2 = drainage.areaM2[i] / 1e6
+    if (sea[i] || areaKm2 < VALLEY_MIN_AREA_KM2) continue
+    const halfWidth = VALLEY_HALF_WIDTH_TILES.find((v) => areaKm2 >= v.minAreaKm2)!.tiles
+    outsideValley[i] = -halfWidth
+    queue.push(i)
+  }
+  queue.sort((a, b) => outsideValley[a] - outsideValley[b])
+  for (let k = 0; k < queue.length; k++) {
+    const c = queue[k]
+    forEachNeighbor(size, c, (n) => {
+      if (outsideValley[n] <= outsideValley[c] + 1) return
+      outsideValley[n] = outsideValley[c] + 1
+      queue.push(n)
+    })
+  }
+
+  const [lowRise, highRise] = PLATEAU_RISE_M
+  return height.map((h, i) => {
+    if (sea[i] || uOverK[i] > PLATEAU_MAX_UPLIFT) return h
+    const x = i % size
+    const y = Math.floor(i / size)
+    const plateau = smoothstep((fbm(seed + 4409, x / 22, y / 22, 3) - PLATEAU_SHARE) / 0.06)
+    const rise = lowRise + (highRise - lowRise) * fbm(seed + 4507, x / 30, y / 30, 2)
+    const scarp = smoothstep(outsideValley[i])
+    return h + plateau * rise * scarp
+  })
 }
 
 function classify(seed: number, size: number, height: number[], sea: boolean[], drainage: Drainage): TileKind[] {
