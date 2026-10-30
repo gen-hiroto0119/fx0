@@ -96,8 +96,8 @@ export const PARAMS = {
     cruiseKmh: 70,
     stopLossMin: 1.0,
     turnaroundMin: 5,
-    opYenPerCarKm: 250,
-    maintYenPerKmYear: 0.3 * OKU,
+    opYenPerCarKm: 400, // crew, power and car upkeep, near Japanese private railways
+    maintYenPerKmYear: 0.5 * OKU,
     trackLifeYears: 40,
     carLifeYears: 15,
     curvature: 1.1,

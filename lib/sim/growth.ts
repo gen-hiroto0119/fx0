@@ -73,6 +73,8 @@ export function buildableM2(world: World, c: Chunk): number {
   return tiles * TILE_AREA_M2
 }
 
+// How much each chunk draws people or jobs of one use. Floor the zoning allows
+// scales the draw, so dense districts hold more than outlying ones.
 function locationWeights(world: World, use: Use): number[] {
   const lvRef = world.region.lvRef
   const port = world.terrain.resources.find((r) => r.kind === 'port')
@@ -80,19 +82,36 @@ function locationWeights(world: World, use: Use): number[] {
     if (c.zoneFar[use] <= 0) return 0
     const relativeLand = Math.max(c.lv, 1) / lvRef
     const rentFactor = relativeLand ** G.rentElasticity
+    const room = c.zoneFar[use] * c.buildableM2
     switch (use) {
       case 'res':
-        return c.access * environment(c) * rentFactor
+        return room * c.access * environment(c) * rentFactor
       case 'office':
-        return c.accessPop * (1 + c.jobs.office / G.officeClusterJobs) ** G.officeClusterExponent * rentFactor
+        return room * c.accessPop * (1 + c.jobs.office / G.officeClusterJobs) ** G.officeClusterExponent * rentFactor
       case 'retail':
-        return c.accessPop * (1 + c.boardings / G.retailBoardingsScale)
+        return room * c.accessPop * (1 + c.boardings / G.retailBoardingsScale)
       case 'industry': {
         const hasPort = port && Math.floor(port.x / CHUNK_TILES) === c.cx && Math.floor(port.y / CHUNK_TILES) === c.cy
         return (1 + (hasPort ? G.portIndustryBonus : 0)) * relativeLand ** G.industryRentElasticity
       }
     }
   })
+}
+
+// Spreads today's totals of people and jobs the way the model wants them, so a
+// new region starts at rest instead of drifting there over its first years.
+export function settleAtRest(world: World) {
+  for (const use of USES) {
+    const w = locationWeights(world, use)
+    const sum = w.reduce((s, v) => s + v, 0)
+    if (sum <= 0) continue
+    const total = world.chunks.reduce((s, c) => s + stock(c, use), 0)
+    world.chunks.forEach((c, i) => {
+      const v = (total * w[i]) / sum
+      if (use === 'res') c.pop = v
+      else c.jobs[use] = v
+    })
+  }
 }
 
 export function regionTargets(basicJobs: number): Record<Use, number> {

@@ -1,7 +1,7 @@
 // @ts-expect-error Node strip-types tests require the source extension.
 import { CHUNK_TILES, PARAMS, TILE_AREA_M2 } from './params.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
-import { applyAccessibility, buildableM2, computeAccessibility, popWeightedAccess } from './growth.ts'
+import { applyAccessibility, buildableM2, computeAccessibility, popWeightedAccess, settleAtRest } from './growth.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { computeLandValues } from './landvalue.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
@@ -28,6 +28,7 @@ const CORE = { radius: 0.9, far: { res: 3, office: 6, retail: 6, industry: 0 } }
 const RING = { radius: 1.8, far: { res: 2, office: 1, retail: 2, industry: 0 } }
 const OUTER = { far: { res: 1, office: 0, retail: 0.5, industry: 0 } }
 const PLAIN_CITY_RING_INDUSTRY = 0.8
+const SETTLE_ROUNDS = 3
 const PORT_INDUSTRY = { radius: 2, far: 1 }
 const MIN_SETTLED_TILES = 8
 
@@ -144,15 +145,39 @@ function zoneAndSettle(world: World) {
     for (const c of mine) c.jobs.retail = G.k * c.pop
   }
 
+  buildFloorForStock(world)
+}
+
+// Local developers have built enough floor for today's people and jobs, with
+// the natural vacancy left over.
+function buildFloorForStock(world: World) {
+  const occupied = 1 - PARAMS.realEstate.naturalVacancy
   for (const c of world.chunks) {
     c.bgFloor = {
-      res: (c.pop * G.floorPerCapita.res) / 0.95,
-      office: (c.jobs.office * G.floorPerCapita.office) / 0.95,
-      retail: (c.jobs.retail * G.floorPerCapita.retail) / 0.95,
-      industry: (c.jobs.industry * G.floorPerCapita.industry) / 0.95,
+      res: (c.pop * G.floorPerCapita.res) / occupied,
+      office: (c.jobs.office * G.floorPerCapita.office) / occupied,
+      retail: (c.jobs.retail * G.floorPerCapita.retail) / occupied,
+      industry: (c.jobs.industry * G.floorPerCapita.industry) / occupied,
     }
     c.floor = { ...c.bgFloor }
   }
+}
+
+// Travel times, accessibility and land values for the current layout, with
+// the reference values set so today's land prices sit near the base.
+function calibrate(world: World) {
+  const traffic = computeTraffic(world)
+  applyTraffic(world, traffic)
+  applyAccessibility(world, computeAccessibility(world.chunks, traffic.minutes))
+  const settled = world.chunks.filter((c) => c.pop > 0)
+  world.region.accessRef = median(settled.map((c) => c.access))
+  world.region.meanAccess0 = popWeightedAccess(world.chunks)
+  const landValues = computeLandValues(world, traffic.minutes)
+  world.chunks.forEach((c, i) => {
+    c.lvTarget = landValues[i].lvTarget
+    c.lv = landValues[i].lvTarget
+  })
+  world.region.lvRef = median(settled.map((c) => c.lv))
 }
 
 export function createWorld(seed: number, size = 128): World {
@@ -202,19 +227,14 @@ export function createWorld(seed: number, size = 128): World {
     })
   }
 
-  // Calibrate the reference values so today's land prices sit near the base.
-  const traffic = computeTraffic(world)
-  applyTraffic(world, traffic)
-  applyAccessibility(world, computeAccessibility(world.chunks, traffic.minutes))
-  const settled = world.chunks.filter((c) => c.pop > 0)
-  world.region.accessRef = median(settled.map((c) => c.access))
-  world.region.meanAccess0 = popWeightedAccess(world.chunks)
-  const landValues = computeLandValues(world, traffic.minutes)
-  world.chunks.forEach((c, i) => {
-    c.lvTarget = landValues[i].lvTarget
-    c.lv = landValues[i].lvTarget
-  })
-  world.region.lvRef = median(settled.map((c) => c.lv))
+  // The hand-drawn cities are a first guess; a few rounds of letting people
+  // and jobs go where the model wants them bring the region to rest.
+  calibrate(world)
+  for (let round = 0; round < SETTLE_ROUNDS; round++) {
+    settleAtRest(world)
+    buildFloorForStock(world)
+    calibrate(world)
+  }
   world.region.popHistory.push(world.chunks.reduce((s, c) => s + c.pop, 0))
   return world
 }
