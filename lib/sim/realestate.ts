@@ -61,6 +61,16 @@ export function buildingValue(world: World, b: Building): number {
   return Math.max(0, annualNoi(world, b, occ) / capRate(world, b))
 }
 
+// Value of a building that is not built yet: its own floor joins the
+// district's supply, so a large building lowers the occupancy it will get.
+export function plannedValue(world: World, b: Building): number {
+  const c = chunkAt(world, b.x, b.y)
+  const use = marketUse(b)
+  const demand = stock(c, use) * G.floorPerCapita[use]
+  const occ = Math.min(1, demand / (c.floor[use] + b.floorArea))
+  return Math.max(0, annualNoi(world, b, occ) / capRate(world, b))
+}
+
 // Rents rise where vacancy is below the natural rate and fall where it is above,
 // a few percent a year as leases renew rather than all at once.
 export function nextRentMultipliers(chunks: Chunk[]): PerUse[] {

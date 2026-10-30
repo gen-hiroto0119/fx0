@@ -1,4 +1,4 @@
-import { OKU, type BuildingUse, type LandCover, type TileKind } from '@/lib/sim'
+import { gameDate, OKU, type BuildingUse, type Condition, type ConditionKind, type LandCover, type MayorPersona, type TileKind } from '@/lib/sim'
 
 export function formatOku(yen: number): string {
   return `${(yen / OKU).toLocaleString('ja-JP', { maximumFractionDigits: 1, minimumFractionDigits: 1 })}億円`
@@ -81,4 +81,25 @@ export const ERROR_LABEL: Record<string, string> = {
 
 export function errorLabel(code: string): string {
   return ERROR_LABEL[code] ?? code
+}
+
+export const PERSONA_LABEL: Record<MayorPersona, string> = {
+  industry: '工業推し',
+  tourism: '観光推し',
+  populist: 'ポピュリスト',
+  prudent: '堅実派',
+}
+
+export const CONDITION_KIND_LABEL: Record<ConditionKind, string> = {
+  plaza: '駅前広場の整備費を負担',
+  openBy: '開業時期を約束',
+  expressStop: '快速の停車を約束',
+  fareFreeze: '運賃の据え置きを約束',
+}
+
+export function conditionText(c: Condition): string {
+  if (c.kind === 'plaza') return `駅前広場の整備費${formatOku(c.yen)}を負担`
+  if (c.kind === 'openBy') return `${gameDate(c.tick).label}までに開業`
+  if (c.kind === 'expressStop') return `駅${c.station + 1}に快速を停める(${gameDate(c.untilTick).year}年目まで)`
+  return `運賃を上げない(${gameDate(c.untilTick).year}年目まで)`
 }

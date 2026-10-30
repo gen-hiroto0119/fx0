@@ -3,7 +3,7 @@ import type { World } from '@/lib/sim'
 // The prototype keeps the whole game in this browser. Storage can be missing or
 // full (private windows, quota), so every access is allowed to fail quietly.
 // Bump the version when the world's shape changes; older saves are then ignored.
-const SAVE_KEY = 'emporion-save-v3'
+const SAVE_KEY = 'emporion-save-v4'
 
 export function loadWorld(): World | null {
   try {

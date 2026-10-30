@@ -11,23 +11,26 @@ import {
   develop,
   firmReport,
   gameDate,
-  grantLine,
   PARAMS,
   planLine,
+  playRivals,
   projectCost,
+  respondToPermit,
   setExpressStops,
   setService,
   startConstruction,
   step,
   TILE_AREA_M2,
+  withdrawLine,
   type BuildingUse,
+  type Offer,
   type Service,
   type Station,
   type World,
 } from '@/lib/sim'
 import { errorLabel, formatOku, USE_LABEL } from './format'
 import { MapCanvas, type Overlay, type Tile } from './map-canvas'
-import { FinancePanel, LinePanel, NewsPanel, Section, TileInfo } from './panels'
+import { FinancePanel, LinePanel, MayorPanel, NewsPanel, Section, TileInfo } from './panels'
 import { clearSave, loadWorld, saveWorld } from './storage'
 
 const PLAYER = 'player'
@@ -94,6 +97,7 @@ export default function Game() {
           break
         }
         step(world)
+        playRivals(world)
       }
       commit()
     },
@@ -137,6 +141,7 @@ export default function Game() {
     }
   }
 
+  // Filing makes the line public; each city it passes through then reviews it.
   const confirmLine = () => {
     const name = `${world.lines.filter((l) => l.owner === PLAYER).length + 1}号線`
     const planned = planLine(world, PLAYER, name, draft)
@@ -144,17 +149,36 @@ export default function Game() {
       setMessage(errorLabel(planned.error))
       return
     }
-    // Permits are granted at once until the AI mayors arrive (M3).
-    const line = planned.value
-    applyForLine(world, PLAYER, line.id)
-    grantLine(world, line.id)
-    if (projectLoan) {
-      const loan = borrow(world, PLAYER, { amount: projectCost(line) * 0.7, years: 30, graceYears: 3, lineId: line.id })
-      if (!loan.ok) setMessage(errorLabel(loan.error))
+    const filed = applyForLine(world, PLAYER, planned.value.id)
+    if (!filed.ok) {
+      setMessage(errorLabel(filed.error))
+      return
     }
-    startConstruction(world, PLAYER, line.id)
     setDraft([])
-    commit(`${name}に着工しました(建設費${formatOku(line.cost)}、工期${line.buildTicksLeft}週)`)
+    commit(`${name}を申請しました(建設費${formatOku(planned.value.cost)})。各市の審査を待ちます`)
+  }
+
+  const startLine = (lineId: string) => {
+    const line = world.lines.find((l) => l.id === lineId)
+    if (!line) return
+    let note = ''
+    if (projectLoan) {
+      const loan = borrow(world, PLAYER, { amount: projectCost(line) * 0.7, years: 30, graceYears: 3, lineId })
+      note = loan.ok ? '、プロジェクト融資を実行' : `、融資できず: ${errorLabel(loan.error)}`
+    }
+    const started = startConstruction(world, PLAYER, lineId)
+    commit(started.ok ? `${line.name}に着工しました(工期${line.buildTicksLeft}週${note})` : errorLabel(started.error))
+  }
+
+  const negotiate = (permitId: string, offer: Offer) => {
+    const result = respondToPermit(world, PLAYER, permitId, offer)
+    const note = { approved: '市長が条件を受け入れました', countered: '市長は条件が足りないと返してきました', rejected: '交渉が決裂しました' }
+    commit(result.ok ? note[result.value] : errorLabel(result.error))
+  }
+
+  const withdraw = (lineId: string) => {
+    const result = withdrawLine(world, PLAYER, lineId)
+    commit(result.ok ? '申請を取り下げました' : errorLabel(result.error))
   }
 
   const applyService = (lineId: string, service: Service, expressStops: number[]) => {
@@ -248,11 +272,11 @@ export default function Game() {
                 <p className="text-muted-foreground">地図をクリックして駅を順に置きます。置いた駅: {draft.length}</p>
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={projectLoan} onChange={(e) => setProjectLoan(e.target.checked)} />
-                  建設費と車両費の70%をプロジェクト融資で借りる(30年・据置3年)
+                  着工時に建設費と車両費の70%をプロジェクト融資で借りる(30年・据置3年)
                 </label>
                 <div className="flex gap-2">
                   <Button size="sm" onClick={confirmLine} disabled={draft.length < 2}>
-                    この路線で着工
+                    この路線を申請
                   </Button>
                   <Button size="sm" variant="ghost" onClick={() => setDraft([])} disabled={draft.length === 0}>
                     やり直す
@@ -316,7 +340,16 @@ export default function Game() {
             <TileInfo world={world} tile={selected} />
           </Section>
           <Section title="路線">
-            <LinePanel world={world} onApplyService={applyService} />
+            <LinePanel
+              world={world}
+              onApplyService={applyService}
+              onStart={startLine}
+              onNegotiate={negotiate}
+              onWithdraw={withdraw}
+            />
+          </Section>
+          <Section title="市長">
+            <MayorPanel world={world} />
           </Section>
           <Section title="財務">
             <FinancePanel world={world} onBorrow={borrowCash} />

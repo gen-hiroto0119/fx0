@@ -264,8 +264,10 @@ export function respondToPermit(world: World, firmId: string, permitId: string, 
   const line = lineOfPermit(world, permit)
   const city = cityById(world, permit.cityId)
 
+  // Promises the mayor asked for keep the terms the mayor stated; the amount
+  // for the station square is the firm's to choose.
   const conditions = [...new Set(offer.kinds)]
-    .map((kind) => shapeCondition(world, line, city, kind, offer.plazaYen ?? 0))
+    .map((kind) => (kind !== 'plaza' && permit.ask.find((c) => c.kind === kind)) || shapeCondition(world, line, city, kind, offer.plazaYen ?? 0))
     .filter((c): c is Condition => c !== null)
   const plaza = conditions.find((c) => c.kind === 'plaza')
   if (plaza && plaza.kind === 'plaza' && firm.cash < plaza.yen) return fail('insufficient_cash')
@@ -288,7 +290,10 @@ export function respondToPermit(world: World, firmId: string, permitId: string, 
 function sign(world: World, permit: Permit, city: City, conditions: Condition[]) {
   permit.status = 'approved'
   const firm = firmById(world, permit.firm)
+  const line = lineOfPermit(world, permit)
   for (const condition of conditions) {
+    // Promising an express stop makes it one now; dropping it later breaks the deal.
+    if (condition.kind === 'expressStop') line.stations[condition.station].express = true
     const kept = condition.kind === 'plaza'
     world.deals.push({
       id: `deal${world.nextId++}`,

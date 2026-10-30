@@ -7,7 +7,7 @@ import { debt, findFirm } from './finance.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { chunkAt } from './network.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
-import { buildingValue } from './realestate.ts'
+import { plannedValue } from './realestate.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { fail, type Result } from './result.ts'
 import type { Building, Firm, Line, RivalPersona, World } from './types.ts'
@@ -146,7 +146,7 @@ function developCandidates(world: World, firm: Firm): Candidate[] {
       ticksLeft: 0, cost: 0, costPaid: 0, bookValue: 0, occupancy: 1, ageTicks: 0, saleTicksLeft: 0,
     }
     const buildCost = floor * RE.yenPerM2.res
-    const value = buildingValue(world, appraisal) * RE.condoPremium
+    const value = plannedValue(world, appraisal) * RE.condoPremium
     const margin = (value - buildCost - parcel.cost) / value
     if (margin < RV.minDevelopMargin) continue
     out.push({

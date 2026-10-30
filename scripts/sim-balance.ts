@@ -8,6 +8,7 @@ import {
   lvAtTile,
   OKU,
   PARAMS,
+  playRivals,
   projectCost,
   step,
   TICKS_PER_YEAR,
@@ -18,7 +19,7 @@ import {
 // @ts-expect-error Node strip-types tests require the source extension.
 } from '../lib/sim/index.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
-import { annualNoi, capRate, chunkOccupancy } from '../lib/sim/realestate.ts'
+import { annualNoi, capRate, chunkOccupancy, plannedValue } from '../lib/sim/realestate.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { buildSampleLine, developWhenAffordable, PLAYER } from './sample-scenario.ts'
 
@@ -51,7 +52,7 @@ function printDeals(world: World, x: number, y: number, label: string) {
     const landCost = lvAtTile(world, x, y) * TILE_AREA_M2
     const buildCost = b.floorArea * RE.yenPerM2[use]
     const cost = landCost + buildCost
-    const value = buildingValue(world, b) * (mode === 'sale' ? RE.condoPremium : 1)
+    const value = plannedValue(world, b) * (mode === 'sale' ? RE.condoPremium : 1)
     const noi = annualNoi(world, b, chunkOccupancy(c, use))
     const metric = mode === 'sale' ? `利益率 ${pct((value - cost) / value)}` : `利回り ${pct(noi / cost)} (cap ${pct(capRate(world, b))})`
     console.log(`${use}/${mode} | ${Math.round(b.floorArea).toLocaleString()}㎡ | ${oku(landCost)} | ${oku(buildCost)} | ${oku(value)} | ${metric}`)
@@ -103,6 +104,7 @@ let railInterest = 0
 for (let t = 0; t < years * TICKS_PER_YEAR; t++) {
   for (const loan of firm.loans) if (loan.lineId === line.id) railInterest += (loan.balance * loan.rate) / TICKS_PER_YEAR
   step(world)
+  playRivals(world)
   minCash = Math.min(minCash, firm.cash)
   if (world.tick % 13 === 0) ratingQuarters.push(firm.rating)
   if (line.stage === 'open' && openedTick < 0) {
@@ -150,3 +152,13 @@ console.log(`鉄道 初年度の利息後損益: ${oku(firstYear ? firstYear.rai
 console.log(`鉄道 単純回収年数: 平均EBITDAで ${(projectCost(line) / avgEbitda).toFixed(1)}年 / 最終年EBITDAで ${(projectCost(line) / lastEbitda).toFixed(1)}年 (目標: 成熟後のEBITDAで回収 8〜15年)`)
 console.log(`最低現金: ${oku(minCash)} / 倒産: ${firm.bankrupt ? 'あり' : 'なし'} / 格付け(四半期ごと): ${ratingQuarters.join(' ')} (目標: 倒産なし・BB以上)`)
 console.log(`最終: 時価総額 ${oku(firm.marketCap)} / 時価純資産 ${oku(firm.nav)} / 現金 ${oku(firm.cash)}`)
+
+// The AI rival plays alongside: what it holds at the end.
+for (const rival of world.firms.filter((f) => f.kind === 'ai')) {
+  const tiles = Object.values(world.parcels).filter((p) => p.owner === rival.id && !p.station).length
+  const buildings = world.buildings.filter((b) => b.owner === rival.id && b.status !== 'sold').length
+  const moves = world.events.filter((e) => e.type === 'rival_move' && e.actor === rival.id).length
+  console.log(
+    `競合 ${rival.name}: 行動 ${moves}回 / 土地 ${tiles}区画 / 建物 ${buildings}棟 / 現金 ${oku(rival.cash)} / 時価総額 ${oku(rival.marketCap)} / 格付け ${rival.rating}${rival.bankrupt ? ' / 倒産' : ''}`,
+  )
+}
