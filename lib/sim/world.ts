@@ -10,7 +10,8 @@ import { buildRoads } from './network.ts'
 import { generateTerrain, placeCities } from './terrain.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { applyTraffic, computeTraffic } from './traffic.ts'
-import type { Chunk, City, PerUse, World } from './types.ts'
+// @ts-expect-error Node strip-types tests require the source extension.
+import { WOODLAND, type Chunk, type City, type PerUse, type World } from './types.ts'
 
 const G = PARAMS.growth
 
@@ -47,16 +48,20 @@ function makeChunks(world: World): Chunk[] {
   const chunks: Chunk[] = []
   for (let cy = 0; cy < n; cy++) {
     for (let cx = 0; cx < n; cx++) {
-      const counts: Record<string, number> = { sea: 0, plain: 0, hill: 0, forest: 0, river: 0, mountain: 0 }
+      const counts: Record<string, number> = { sea: 0, plain: 0, hill: 0, river: 0, mountain: 0, woodland: 0 }
       for (let y = cy * CHUNK_TILES; y < (cy + 1) * CHUNK_TILES; y++) {
-        for (let x = cx * CHUNK_TILES; x < (cx + 1) * CHUNK_TILES; x++) counts[t.kind[y * t.size + x]]++
+        for (let x = cx * CHUNK_TILES; x < (cx + 1) * CHUNK_TILES; x++) {
+          const i = y * t.size + x
+          counts[t.kind[i]]++
+          if (WOODLAND.includes(t.cover[i])) counts.woodland++
+        }
       }
       const total = CHUNK_TILES * CHUNK_TILES
-      const buildable = counts.plain + counts.hill + counts.forest
-      const landFactor = buildable > 0 ? (counts.plain + 0.8 * counts.hill + 0.9 * counts.forest) / buildable : 0.1
+      const buildable = counts.plain + counts.hill
+      const landFactor = buildable > 0 ? (counts.plain + 0.8 * counts.hill) / buildable : 0.1
       const view = Math.min(
         1,
-        (counts.sea > total * 0.05 ? 0.5 : 0) + (counts.forest > total * 0.2 ? 0.3 : 0) + (counts.mountain > total * 0.1 ? 0.3 : 0),
+        (counts.sea > total * 0.05 ? 0.5 : 0) + (counts.woodland > total * 0.2 ? 0.3 : 0) + (counts.mountain > total * 0.1 ? 0.3 : 0),
       )
       chunks.push({
         id: cy * n + cx,

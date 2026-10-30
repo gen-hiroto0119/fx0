@@ -1,4 +1,4 @@
-import { OKU, type BuildingUse, type TileKind } from '@/lib/sim'
+import { OKU, type BuildingUse, type LandCover, type TileKind } from '@/lib/sim'
 
 export function formatOku(yen: number): string {
   return `${(yen / OKU).toLocaleString('ja-JP', { maximumFractionDigits: 1, minimumFractionDigits: 1 })}億円`
@@ -16,9 +16,20 @@ export const TILE_KIND_LABEL: Record<TileKind, string> = {
   sea: '海',
   plain: '平地',
   hill: '丘陵',
-  forest: '森林',
   river: '川',
   mountain: '山地',
+}
+
+export const COVER_LABEL: Record<LandCover, string> = {
+  water: '水面',
+  paddy: '水田',
+  field: '畑',
+  grove: '屋敷林・平地林',
+  satoyama: '里山の雑木林',
+  bamboo: '竹林',
+  conifer: 'スギ・ヒノキの人工林',
+  broadleaf: '広葉樹林',
+  bare: '岩場',
 }
 
 export const USE_LABEL: Record<BuildingUse, string> = {

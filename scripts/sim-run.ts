@@ -33,7 +33,7 @@ const player = 'player'
 
 function buildable(w: World, x: number, y: number): boolean {
   const k = w.terrain.kind[y * w.terrain.size + x]
-  return k === 'plain' || k === 'hill' || k === 'forest'
+  return k === 'plain' || k === 'hill'
 }
 
 function snap(w: World, x: number, y: number): Station {

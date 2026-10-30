@@ -13,7 +13,7 @@ import {
   type Service,
   type World,
 } from '@/lib/sim'
-import { formatCount, formatOku, formatYenPerM2, TILE_KIND_LABEL, USE_LABEL } from './format'
+import { COVER_LABEL, formatCount, formatOku, formatYenPerM2, TILE_KIND_LABEL, USE_LABEL } from './format'
 import type { Tile } from './map-canvas'
 
 const PLAYER = 'player'
@@ -50,6 +50,7 @@ export function TileInfo({ world, tile }: { world: World; tile: Tile | null }) {
   if (!tile) return <p className="text-sm text-muted-foreground">地図のマスをクリックすると詳細が出ます。</p>
   const { x, y } = tile
   const kind = world.terrain.kind[y * world.terrain.size + x]
+  const cover = world.terrain.cover[y * world.terrain.size + x]
   const chunk = chunkAt(world, x, y)
   const city = world.cities.find((c) => c.id === chunk.cityId)
   const parcel = world.parcels[`${x},${y}`]
@@ -58,6 +59,7 @@ export function TileInfo({ world, tile }: { world: World; tile: Tile | null }) {
   return (
     <div className="space-y-1">
       <Row label="位置" value={`(${x}, ${y}) ${TILE_KIND_LABEL[kind]}`} />
+      <Row label="土地被覆" value={`${COVER_LABEL[cover]}・標高${Math.round(world.terrain.height[y * world.terrain.size + x])}m`} />
       <Row label="地区" value={city ? city.name : '郊外'} />
       <Row label="地区の人口 / 雇用" value={`${formatCount(chunk.pop)} / ${formatCount(jobs)}`} />
       <Row label="地価" value={formatYenPerM2(lvAtTile(world, x, y))} />

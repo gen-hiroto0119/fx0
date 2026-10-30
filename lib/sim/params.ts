@@ -88,7 +88,7 @@ export const PARAMS = {
   // Rail
   rail: {
     trackYenPerKm: 30 * OKU,
-    terrainMult: { plain: 1, hill: 1.3, forest: 1.1, river: 2.5, sea: 2.5, mountain: 2.5 } as const,
+    terrainMult: { plain: 1, hill: 1.3, river: 2.5, sea: 2.5, mountain: 2.5 } as const,
     stationYen: 10 * OKU,
     expressStationYen: 25 * OKU,
     carYen: 1.8 * OKU,

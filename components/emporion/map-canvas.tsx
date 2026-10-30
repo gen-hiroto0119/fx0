@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { CHUNK_TILES, PARAMS, type Station, type TileKind, type World } from '@/lib/sim'
+import { CHUNK_TILES, PARAMS, type LandCover, type Station, type World } from '@/lib/sim'
 
 export type Overlay = 'none' | 'population' | 'landValue' | 'traffic'
 export type Tile = { x: number; y: number }
@@ -15,14 +15,19 @@ type Props = {
   onTileClick: (tile: Tile) => void
 }
 
-const TERRAIN_RGB: Record<TileKind, [number, number, number]> = {
-  sea: [70, 130, 180],
-  river: [100, 160, 210],
-  plain: [196, 214, 160],
-  forest: [110, 150, 95],
-  hill: [170, 175, 130],
-  mountain: [140, 125, 110],
+// Colour comes from what covers the ground; the landform shows through the hillshade.
+const COVER_RGB: Record<LandCover, [number, number, number]> = {
+  water: [100, 160, 210],
+  paddy: [176, 212, 140],
+  field: [214, 206, 156],
+  grove: [112, 152, 96],
+  satoyama: [126, 160, 98],
+  bamboo: [150, 186, 104],
+  conifer: [66, 112, 82],
+  broadleaf: [96, 138, 84],
+  bare: [168, 156, 140],
 }
+const SEA_RGB: [number, number, number] = [70, 130, 180]
 
 const OWNER_COLOR: Record<string, string> = { player: '#2563eb', rival: '#ea580c' }
 const USE_COLOR: Record<string, string> = {
@@ -53,22 +58,9 @@ function hillshade(dzdx: number, dzdy: number): number {
   return lit / lz // flat ground keeps its base colour
 }
 
-// Lowland plains read greener and raised ground (plateaus, fans) more tan, so
-// plateaus stand out from the valleys cut into them.
-const LOWLAND_TINT_M = [10, 40] as const
-
-function elevationTint(rgb: [number, number, number], kind: TileKind, heightM: number): [number, number, number] {
-  if (kind !== 'plain') return rgb
-  const [lo, hi] = LOWLAND_TINT_M
-  const t = Math.max(0, Math.min(1, (heightM - lo) / (hi - lo)))
-  const lowland: [number, number, number] = [178, 210, 150]
-  const upland: [number, number, number] = [214, 210, 160]
-  return [0, 1, 2].map((c) => lowland[c] + (upland[c] - lowland[c]) * t) as [number, number, number]
-}
-
 // The terrain never changes for a seed, so it is drawn once into a 1px-per-tile image.
 function terrainImage(world: World): HTMLCanvasElement {
-  const { size, kind, height } = world.terrain
+  const { size, kind, cover, height } = world.terrain
   const canvas = document.createElement('canvas')
   canvas.width = size
   canvas.height = size
@@ -76,7 +68,7 @@ function terrainImage(world: World): HTMLCanvasElement {
   const image = ctx.createImageData(size, size)
   const at = (x: number, y: number) => height[Math.min(size - 1, Math.max(0, y)) * size + Math.min(size - 1, Math.max(0, x))]
   for (let i = 0; i < size * size; i++) {
-    const [r, g, b] = elevationTint(TERRAIN_RGB[kind[i]], kind[i], height[i])
+    const [r, g, b] = kind[i] === 'sea' ? SEA_RGB : COVER_RGB[cover[i]]
     const x = i % size
     const y = Math.floor(i / size)
     const dzdx = (at(x + 1, y) - at(x - 1, y)) / (2 * TILE_SPAN_M)

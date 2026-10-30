@@ -24,7 +24,7 @@ function firstTile(world, ok) {
 
 function buildable(world, x, y) {
   const k = world.terrain.kind[y * world.terrain.size + x]
-  return k === 'plain' || k === 'hill' || k === 'forest'
+  return k === 'plain' || k === 'hill'
 }
 
 function stationsBetween(world, a, b, count) {

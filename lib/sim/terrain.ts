@@ -2,7 +2,7 @@
 import { TILE_M } from './params.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { fbm } from './rng.ts'
-import type { City, CityKind, Resource, Terrain, TileKind } from './types.ts'
+import type { City, CityKind, LandCover, Resource, Terrain, TileKind } from './types.ts'
 
 // Terrain follows the stream power law: where the ground is uplifted, rivers
 // cut down until erosion balances uplift, which at steady state gives each
@@ -52,7 +52,12 @@ const PLAIN_ROUGHNESS_TILES = 6
 const RIVER_MIN_AREA_KM2 = 36
 const SEA_DEPTH_M = -10
 
-// Kinds from height and slope (metres, rise over run).
+// Land cover (rise over run for slopes, metres for heights).
+const PADDY_MAX = { heightM: 14, slope: 0.02 } // low, flat ground along the rivers is rice paddy
+const BARE_SLOPE = 0.55 // rock shows where it is too steep for forest
+const PLANTATION_MAX_M = 500 // cedar and cypress plantations stay on the lower mountain slopes
+
+// Landforms from height and slope (metres, rise over run).
 const MOUNTAIN = { heightM: 350, slope: 0.3 }
 const HILL = { heightM: 120, slope: 0.1 }
 
@@ -302,8 +307,10 @@ export function generateTerrain(seed: number, size: number): Terrain {
   height = fillPits(size, raisePlateaus(seed, size, height, sea, drainage, uOverK), sea)
   drainage = computeDrainage(size, height, sea)
 
-  const kind = classify(seed, size, height, sea, drainage)
-  const terrain: Terrain = { size, height, kind, resources: [] }
+  const slope = localSlopes(size, height, sea, drainage)
+  const kind = classifyLandform(size, height, sea, slope, drainage)
+  const cover = classifyCover(seed, size, height, kind, slope)
+  const terrain: Terrain = { size, height, kind, cover, resources: [] }
   terrain.resources = placeResources(terrain)
   return terrain
 }
@@ -369,20 +376,22 @@ function raisePlateaus(
   })
 }
 
-function classify(seed: number, size: number, height: number[], sea: boolean[], drainage: Drainage): TileKind[] {
-  const kind: TileKind[] = new Array(size * size)
-  for (let i = 0; i < size * size; i++) {
-    if (sea[i]) {
-      kind[i] = 'sea'
-      continue
-    }
+// Each tile's slope toward the tile it drains to.
+function localSlopes(size: number, height: number[], sea: boolean[], drainage: Drainage): number[] {
+  return height.map((h, i) => {
     const r = drainage.receiver[i]
-    const slope = r >= 0 ? (height[i] - (sea[r] ? 0 : height[r])) / drainage.distanceM[i] : 0
-    const forest = fbm(seed + 77, (i % size) / 10, Math.floor(i / size) / 10, 2)
-    if (height[i] > MOUNTAIN.heightM || slope > MOUNTAIN.slope) kind[i] = 'mountain'
-    else if (height[i] > HILL.heightM || slope > HILL.slope) kind[i] = forest > 0.5 ? 'forest' : 'hill'
-    else kind[i] = forest > 0.66 ? 'forest' : 'plain'
-  }
+    if (sea[i] || r < 0) return 0
+    return (h - (sea[r] ? 0 : height[r])) / drainage.distanceM[i]
+  })
+}
+
+function classifyLandform(size: number, height: number[], sea: boolean[], slope: number[], drainage: Drainage): TileKind[] {
+  const kind: TileKind[] = height.map((h, i) => {
+    if (sea[i]) return 'sea'
+    if (h > MOUNTAIN.heightM || slope[i] > MOUNTAIN.slope) return 'mountain'
+    if (h > HILL.heightM || slope[i] > HILL.slope) return 'hill'
+    return 'plain'
+  })
 
   // Large catchments are rivers. A diagonal step also marks one side tile so
   // the river stays connected edge to edge on the grid.
@@ -400,6 +409,30 @@ function classify(seed: number, size: number, height: number[], sea: boolean[], 
     }
   }
   return kind
+}
+
+// What grows where, following the usual Japanese pattern: paddies on the
+// river lowland, fields on fans and plateaus with scattered groves, coppice
+// woods (里山) and bamboo on hills and scarps, cedar plantations low in the
+// mountains, broadleaf forest above them, and rock where it is too steep.
+function classifyCover(seed: number, size: number, height: number[], kind: TileKind[], slope: number[]): LandCover[] {
+  const noise = (offset: number, i: number, scale: number) => fbm(seed + offset, (i % size) / scale, Math.floor(i / size) / scale, 2)
+  return kind.map((k, i) => {
+    switch (k) {
+      case 'sea':
+      case 'river':
+        return 'water'
+      case 'mountain':
+        if (slope[i] > BARE_SLOPE) return 'bare'
+        return height[i] < PLANTATION_MAX_M && noise(6007, i, 9) > 0.5 ? 'conifer' : 'broadleaf'
+      case 'hill':
+        if (noise(6101, i, 5) > 0.68) return 'bamboo'
+        return noise(6203, i, 8) > 0.6 ? 'conifer' : 'satoyama'
+      case 'plain':
+        if (noise(77, i, 10) > 0.68) return 'grove'
+        return height[i] < PADDY_MAX.heightM && slope[i] < PADDY_MAX.slope ? 'paddy' : 'field'
+    }
+  })
 }
 
 function placeResources(t: Terrain): Resource[] {

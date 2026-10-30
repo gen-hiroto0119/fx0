@@ -1,7 +1,23 @@
 // Shared state shapes for the Emporion simulation. Everything here is plain data
 // so a world can be serialized to the database between ticks.
 
-export type TileKind = 'sea' | 'plain' | 'hill' | 'forest' | 'river' | 'mountain'
+// The landform. It decides what can be built and what construction costs.
+export type TileKind = 'sea' | 'plain' | 'hill' | 'river' | 'mountain'
+
+// What covers the ground, independent of the landform: farmland, woods of
+// several kinds, or bare rock. Used for how the map looks and for scenery.
+export type LandCover =
+  | 'water'
+  | 'paddy' // 水田
+  | 'field' // 畑
+  | 'grove' // 屋敷林・平地林
+  | 'satoyama' // 里山の雑木林
+  | 'bamboo' // 竹林
+  | 'conifer' // スギ・ヒノキの人工林
+  | 'broadleaf' // 広葉樹林
+  | 'bare' // 岩場
+
+export const WOODLAND: readonly LandCover[] = ['grove', 'satoyama', 'bamboo', 'conifer', 'broadleaf']
 export type Use = 'res' | 'office' | 'retail' | 'industry'
 export type JobUse = Exclude<Use, 'res'>
 export type PerUse = Record<Use, number>
@@ -13,8 +29,9 @@ export type Resource = { kind: 'port' | 'onsen' | 'ore'; x: number; y: number }
 
 export type Terrain = {
   size: number
-  height: number[]
+  height: number[] // metres above sea level
   kind: TileKind[]
+  cover: LandCover[]
   resources: Resource[]
 }
 
