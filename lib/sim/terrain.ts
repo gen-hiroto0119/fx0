@@ -683,7 +683,7 @@ export function placeCities(t: Terrain): City[] {
           ? [t.basin.x, t.basin.y]
           : [s.at[0] * t.size, s.at[1] * t.size]
     const i = nearest(t, px, py, (j) => t.kind[j] === s.tile || t.kind[j] === 'plain')
-    return { id: s.id, name: s.name, kind: s.kind, persona: s.persona, x: i % t.size, y: Math.floor(i / t.size) }
+    return { id: s.id, name: s.name, kind: s.kind, persona: s.persona, x: i % t.size, y: Math.floor(i / t.size), relation: {} }
   })
 }
 

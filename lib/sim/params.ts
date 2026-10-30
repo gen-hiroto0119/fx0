@@ -143,6 +143,52 @@ export const PARAMS = {
     stationNearM: 800, // buildings this close to an open station get a lower cap rate
     stationBuildingFar: 4,
   },
+  // Permits from the mayors. A line needs every city it passes through.
+  permits: {
+    reviewTicks: 4,
+    reviewTicksPerCityKm: 0.25, // longer stretches take longer, up to the cap
+    reviewTicksMax: 8,
+    approveAt: 0.6, // score at or above: approved without conditions
+    rejectBelow: -0.2, // score below: refused outright
+    maxRounds: 5,
+    refileBlockTicks: 8,
+    refuseRelation: -50, // below this a mayor will not negotiate
+    relationWeight: 0.005, // score per relation point
+    // How each kind of mayor weighs a line's effects (each effect is roughly -1..1).
+    weights: {
+      industry: { service: 0.6, jobs: 0.8, scenery: 0.2, nuisance: 0.4 },
+      tourism: { service: 0.7, jobs: 0.3, scenery: 0.7, nuisance: 0.5 },
+      populist: { service: 0.9, jobs: 0.5, scenery: 0.3, nuisance: 0.6 },
+      prudent: { service: 0.6, jobs: 0.4, scenery: 0.4, nuisance: 0.4 },
+    },
+    servedPopForFullService: 30_000, // people near the city's stations for the full service effect
+    spendForFullJobs: 200 * OKU, // construction spending in the city for the full jobs effect
+    tilesForFullScenery: 20, // woodland and hill tiles crossed for the full scenery loss
+    tilesForFullNuisance: 10, // tiles crossed through dense districts for the full nuisance
+    denseChunkPop: 10_000,
+    // What each promise is worth to each kind of mayor, in score.
+    conditionValue: {
+      industry: { plazaPer10Oku: 0.1, openBy: 0.15, expressStop: 0.15, fareFreeze: 0.1 },
+      tourism: { plazaPer10Oku: 0.12, openBy: 0.1, expressStop: 0.2, fareFreeze: 0.1 },
+      populist: { plazaPer10Oku: 0.2, openBy: 0.1, expressStop: 0.2, fareFreeze: 0.25 },
+      prudent: { plazaPer10Oku: 0.05, openBy: 0.25, expressStop: 0.1, fareFreeze: 0.15 },
+    },
+    plazaStep: 5 * OKU,
+    plazaMax: 60 * OKU,
+    dealYears: 5,
+    openBySlackTicks: 8, // a promised opening date leaves this much room after the build time
+    penaltyYen: 10 * OKU,
+    relation: { kept: 10, broken: -30, plazaPer10Oku: 3, rumor: -3 },
+  },
+  // AI rivals: the code proposes moves, the rival picks among them.
+  rival: {
+    actionsPerTick: 3,
+    candidates: 10,
+    reserveYen: 60 * OKU, // cash the rival keeps back
+    aheadRadius: 2, // tiles around another firm's announced station worth buying
+    developFarShare: 0.5,
+    minDevelopMargin: 0.08,
+  },
   // Finance
   finance: {
     baseRate: 0.015,

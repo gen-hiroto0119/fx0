@@ -12,7 +12,10 @@ import {
   OKU,
   PARAMS,
   planLine,
+  playRivals,
   projectCost,
+  respondToPermit,
+  setExpressStops,
   setService,
   startConstruction,
   step,
@@ -202,4 +205,80 @@ test('ratings move one notch a quarter', () => {
   assert.equal(closeQuarter(world, firm).rating, 'A')
   assert.equal(closeQuarter(world, firm).rating, 'BBB')
   assert.equal(closeQuarter(world, firm).rating, 'BBB')
+})
+
+// A line from the port city to the hot-spring city, which the tourism mayor
+// does not approve outright on this seed.
+function lineToTheHills(world) {
+  const [a, , c] = world.cities
+  const line = planLine(world, 'player', 'test', stationsBetween(world, a, c, 6))
+  setExpressStops(world, 'player', line.value.id, [2, 3, 4])
+  return line.value
+}
+
+test('mayors decide clear cases and negotiate the rest', () => {
+  const world = createWorld(42)
+  const line = lineToTheHills(world)
+  assert.equal(applyForLine(world, 'player', line.id).ok, true)
+  const permits = world.permits.filter((p) => p.lineId === line.id)
+  assert.deepEqual(permits.map((p) => p.cityId).sort(), ['A', 'C'])
+
+  while (permits.some((p) => p.status === 'reviewing')) step(world)
+  const port = permits.find((p) => p.cityId === 'A')
+  const hills = permits.find((p) => p.cityId === 'C')
+  assert.equal(port.status, 'approved')
+  assert.equal(hills.status, 'negotiating')
+  assert.equal(line.stage, 'applied', 'the line waits for every city')
+
+  // Too little: the mayor repeats the ask.
+  assert.deepEqual(respondToPermit(world, 'player', hills.id, { kinds: ['openBy'] }), { ok: true, value: 'countered' })
+  const plazaYen = hills.ask.find((c) => c.kind === 'plaza')?.yen
+  assert.deepEqual(respondToPermit(world, 'player', hills.id, { kinds: hills.ask.map((c) => c.kind), plazaYen }), {
+    ok: true,
+    value: 'approved',
+  })
+  assert.equal(line.stage, 'approved')
+  assert.ok(world.deals.some((d) => d.cityId === 'C' && d.condition.kind === 'expressStop' && d.status === 'active'))
+})
+
+test('breaking a promise costs a penalty and the mayor\'s goodwill', () => {
+  const world = createWorld(42)
+  const line = lineToTheHills(world)
+  applyForLine(world, 'player', line.id)
+  const hills = world.permits.find((p) => p.lineId === line.id && p.cityId === 'C')
+  while (hills.status === 'reviewing') step(world)
+  respondToPermit(world, 'player', hills.id, { kinds: ['expressStop', 'openBy', 'fareFreeze', 'plaza'], plazaYen: 60 * OKU })
+  assert.equal(hills.status, 'approved')
+
+  const city = world.cities.find((c) => c.id === 'C')
+  const before = city.relation.player
+  const cash = world.firms[0].cash
+  setService(world, 'player', line.id, { fareMult: 1.2 })
+  step(world)
+  const deal = world.deals.find((d) => d.condition.kind === 'fareFreeze')
+  assert.equal(deal.status, 'broken')
+  assert.ok(city.relation.player <= before - 30)
+  assert.ok(world.ledger.some((e) => e.account === 'penalty' && e.amount === -PARAMS.permits.penaltyYen))
+  assert.ok(world.firms[0].cash < cash)
+})
+
+test('the rival buys land near stations another firm has announced', () => {
+  const world = createWorld(42)
+  const [a, b] = world.cities
+  const line = planLine(world, 'player', 'test', stationsBetween(world, a, b, 8)).value
+  for (let t = 0; t < 4; t++) playRivals(world)
+  assert.equal(Object.values(world.parcels).filter((p) => p.owner === 'rival').length, 0, 'an unannounced plan is invisible')
+
+  applyForLine(world, 'player', line.id)
+  for (let t = 0; t < 4; t++) {
+    step(world)
+    playRivals(world)
+  }
+  const near = Object.entries(world.parcels).filter(([key, p]) => {
+    const [x, y] = key.split(',').map(Number)
+    return p.owner === 'rival' && line.stations.some((s) => Math.max(Math.abs(s.x - x), Math.abs(s.y - y)) <= 2)
+  })
+  assert.ok(near.length >= 3, `rival bought ${near.length} tiles near the stations`)
+  const site = line.stations[3]
+  assert.deepEqual(buyLand(world, 'rival', site.x, site.y), { ok: false, error: 'reserved_for_station' })
 })

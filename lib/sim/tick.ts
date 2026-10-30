@@ -11,6 +11,8 @@ import { applyLandValues, computeLandValues } from './landvalue.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { chunkAt } from './network.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
+import { checkDeals, reviewPermits } from './permits.ts'
+// @ts-expect-error Node strip-types tests require the source extension.
 import { operateLines, progressLines } from './rail.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { updateRealEstate } from './realestate.ts'
@@ -20,7 +22,8 @@ import type { World } from './types.ts'
 
 const STATION_ZONE = { res: 1.5, office: 1, retail: 1.5 }
 
-// Until the AI mayors arrive (M3), a newly opened station upzones its chunk.
+// A newly opened station upzones its chunk. Asking the mayor for more floor
+// area is a later step.
 function upzoneNewStations(world: World) {
   for (const line of world.lines) {
     if (line.stage !== 'open' || line.stageTick !== world.tick) continue
@@ -35,8 +38,11 @@ function upzoneNewStations(world: World) {
 
 // Advance the world by one tick (one game week). Each model reads the world and
 // returns its result, and the step writes the results back in order:
-// construction, travel, where people and jobs go, money, then prices.
+// permits and promises, construction, travel, where people and jobs go, money,
+// then prices.
 export function step(world: World): TrafficResult {
+  reviewPermits(world)
+  checkDeals(world)
   progressLines(world)
   upzoneNewStations(world)
   refreshFloor(world)

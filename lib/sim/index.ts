@@ -6,6 +6,19 @@ export * from './actions.ts'
 export * from './corporate.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 export * from './params.ts'
+export {
+  CONDITION_KINDS,
+  cityOf,
+  conditionWorth,
+  lineCities,
+  lineImpact,
+  permitScore,
+  respondToPermit,
+  withdrawLine,
+  type ConditionKind,
+  type Offer,
+// @ts-expect-error Node strip-types tests require the source extension.
+} from './permits.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 export * from './report.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
@@ -22,3 +35,5 @@ export { projectCost } from './rail.ts'
 export { step } from './tick.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 export { createWorld } from './world.ts'
+// @ts-expect-error Node strip-types tests require the source extension.
+export { chooseByPersona, playRival, playRivals, rivalBriefing, rivalCandidates, type Briefing, type Candidate, type Chooser } from './rival.ts'

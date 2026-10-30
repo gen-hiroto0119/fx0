@@ -169,6 +169,9 @@ export function createWorld(seed: number, size = 128): World {
     parcels: {},
     buildings: [],
     lines: [],
+    permits: [],
+    deals: [],
+    blockedUntil: {},
     ledger: [],
     events: [],
     region: { basicJobs: 0, accessRef: 1, meanAccess0: 1, lvRef: 1, popHistory: [] },
@@ -178,14 +181,16 @@ export function createWorld(seed: number, size = 128): World {
   zoneAndSettle(world)
   world.roads = buildRoads(world)
   world.region.basicJobs = world.chunks.reduce((s, c) => s + c.jobs.office + c.jobs.industry, 0)
-  for (const [id, name, kind] of [
-    ['player', 'Emporion', 'player'],
-    ['rival', '大和開発', 'ai'],
+  for (const [id, name, kind, persona] of [
+    ['player', 'Emporion', 'player', undefined],
+    ['rival', '大和開発', 'ai', 'property'],
   ] as const) {
+    for (const city of world.cities) city.relation[id] = 0
     world.firms.push({
       id,
       name,
       kind,
+      persona,
       cash: PARAMS.finance.startingCash,
       loans: [],
       shares: 100_000_000,

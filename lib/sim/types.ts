@@ -42,10 +42,13 @@ export type City = {
   id: string
   name: string
   kind: CityKind
-  persona: 'industry' | 'tourism' | 'populist' | 'prudent'
+  persona: MayorPersona
   x: number
   y: number
+  relation: Record<string, number> // the mayor's standing with each firm, -100 to 100
 }
+
+export type MayorPersona = 'industry' | 'tourism' | 'populist' | 'prudent'
 
 export type Chunk = {
   id: number
@@ -136,10 +139,13 @@ export type Loan = {
   buildingId?: string
 }
 
+export type RivalPersona = 'expansion' | 'property' | 'discount'
+
 export type Firm = {
   id: string
   name: string
   kind: 'player' | 'ai'
+  persona?: RivalPersona // AI firms only
   cash: number
   loans: Loan[]
   shares: number
@@ -181,6 +187,42 @@ export type LedgerEntry = {
   pl: boolean // false for capital flows such as land purchases and loan principal
 }
 
+// --- Permits and deals with the mayors ---
+
+// What a firm can promise a mayor. The menu is fixed so the code can check
+// every promise each week; nothing outside it can be agreed.
+export type Condition =
+  | { kind: 'plaza'; yen: number } // pays for a station square or park, once
+  | { kind: 'openBy'; tick: number } // the line opens by this week
+  | { kind: 'expressStop'; station: number; untilTick: number } // express trains stop here
+  | { kind: 'fareFreeze'; fareMult: number; untilTick: number } // no fare rise
+
+// One city's review of one line. Clear cases are decided by the score alone;
+// the band in between is negotiated a round at a time.
+export type Permit = {
+  id: string
+  lineId: string
+  firm: string
+  cityId: string
+  status: 'reviewing' | 'negotiating' | 'approved' | 'rejected' | 'withdrawn'
+  filedTick: number
+  decideTick: number
+  score: number
+  round: number
+  ask: Condition[] // what the mayor wants before approving
+  offered: Condition[] // the firm's last offer
+}
+
+export type Deal = {
+  id: string
+  firm: string
+  cityId: string
+  lineId: string
+  condition: Condition
+  status: 'active' | 'kept' | 'broken' | 'void' // void: the line never went ahead
+  agreedTick: number
+}
+
 export type SimEvent = {
   tick: number
   type: string
@@ -203,6 +245,9 @@ export type World = {
   parcels: Record<string, Parcel>
   buildings: Building[]
   lines: Line[]
+  permits: Permit[]
+  deals: Deal[]
+  blockedUntil: Record<string, number> // `${cityId}:${firmId}` → week a refused firm may file again
   ledger: LedgerEntry[]
   events: SimEvent[]
   region: {

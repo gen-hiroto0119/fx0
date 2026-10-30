@@ -3,7 +3,7 @@ import { PARAMS, TICKS_PER_YEAR, TILE_M } from './params.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { book, firmById } from './finance.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
-import { dailyCarKm, lineKm, trainsNeeded } from './network.ts'
+import { dailyCarKm, lineKm, trackTiles, trainsNeeded } from './network.ts'
 import type { Line, TileKind, World } from './types.ts'
 
 const R = PARAMS.rail
@@ -11,19 +11,15 @@ const R = PARAMS.rail
 // Construction cost: track priced by the terrain it crosses, plus stations.
 export function lineCost(world: World, line: Line): number {
   const t = world.terrain
+  const tiles = trackTiles(line)
   let cost = 0
   for (let i = 1; i < line.stations.length; i++) {
     const a = line.stations[i - 1]
     const b = line.stations[i]
-    const steps = Math.max(1, Math.ceil(Math.hypot(a.x - b.x, a.y - b.y)))
     const km = (Math.hypot(a.x - b.x, a.y - b.y) * TILE_M * R.curvature) / 1000
-    let mult = 0
-    for (let s = 0; s < steps; s++) {
-      const x = Math.round(a.x + ((b.x - a.x) * (s + 0.5)) / steps)
-      const y = Math.round(a.y + ((b.y - a.y) * (s + 0.5)) / steps)
-      mult += R.terrainMult[t.kind[y * t.size + x] as TileKind]
-    }
-    cost += km * R.trackYenPerKm * (mult / steps)
+    const segment = tiles.filter((p) => p.segment === i - 1)
+    const mult = segment.reduce((s, p) => s + R.terrainMult[t.kind[p.y * t.size + p.x] as TileKind], 0)
+    cost += km * R.trackYenPerKm * (mult / segment.length)
   }
   for (const s of line.stations) cost += s.express ? R.expressStationYen : R.stationYen
   return cost

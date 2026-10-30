@@ -20,14 +20,15 @@ import { chunkAt } from './network.ts'
 import { buildTicks, ensureCars, lineCost, projectCost } from './rail.ts'
 // @ts-expect-error Node strip-types tests require the source extension.
 import { buildingValue } from './realestate.ts'
+// @ts-expect-error Node strip-types tests require the source extension.
+import { blockingCity, filePermits, noteRumor } from './permits.ts'
+// @ts-expect-error Node strip-types tests require the source extension.
+import { fail, ok, type Result } from './result.ts'
 import type { BuildingUse, Line, Service, Station, World } from './types.ts'
 
 // The action API shared by the player and the AI rivals. Every action
 // validates against the same rules and returns an error instead of throwing.
-export type Result<T = undefined> = { ok: true; value: T } | { ok: false; error: string }
-
-const ok = <T>(value: T): Result<T> => ({ ok: true, value })
-const fail = (error: string): Result<never> => ({ ok: false, error })
+export type { Result } from './result.ts'
 
 const L = PARAMS.lv
 const RE = PARAMS.realEstate
@@ -45,12 +46,21 @@ export function landPrice(world: World, firmId: string, x: number, y: number): n
   return lvAtTile(world, x, y) * TILE_AREA_M2 * (1 + L.kappa * (recent / TILES_PER_CHUNK))
 }
 
+// Once a line is filed its station sites are public and reserved for it, so
+// nobody else can buy them out from under the line.
+function reservedForStation(world: World, firmId: string, x: number, y: number): boolean {
+  return world.lines.some(
+    (l) => l.owner !== firmId && l.stage !== 'planned' && l.stations.some((s) => s.x === x && s.y === y),
+  )
+}
+
 export function buyLand(world: World, firmId: string, x: number, y: number): Result<number> {
   if (!inBounds(world, x, y)) return fail('out_of_bounds')
   const kind = world.terrain.kind[y * world.terrain.size + x]
   if (kind === 'sea' || kind === 'river' || kind === 'mountain') return fail('not_buildable')
   const key = `${x},${y}`
   if (world.parcels[key]) return fail('already_owned')
+  if (reservedForStation(world, firmId, x, y)) return fail('reserved_for_station')
   const firm = findFirm(world, firmId)
   if (!firm) return fail('unknown_firm')
   const price = landPrice(world, firmId, x, y)
@@ -66,6 +76,7 @@ export function buyLand(world: World, firmId: string, x: number, y: number): Res
   if (bought / TILES_PER_CHUNK > L.rumorShare && c.rumorUntil <= world.tick) {
     c.rumorUntil = world.tick + L.rumorTicks
     world.events.push({ tick: world.tick, type: 'land_rumor', actor: firmId, x, y, importance: 3 })
+    noteRumor(world, firmId, x, y)
   }
   return ok(price)
 }
@@ -110,22 +121,27 @@ function lineOf(world: World, firmId: string, lineId: string): Line | null {
   return line && line.owner === firmId ? line : null
 }
 
-// Filing makes the plan public; land prices along it start to move.
+// Filing makes the plan public; land prices along it start to move. Each city
+// the line passes through reviews it (see permits.ts).
 export function applyForLine(world: World, firmId: string, lineId: string): Result {
   const line = lineOf(world, firmId, lineId)
   if (!line) return fail('unknown_line')
   if (line.stage !== 'planned') return fail('wrong_stage')
+  if (blockingCity(world, firmId, line)) return fail('refile_blocked')
+  filePermits(world, line)
   line.stage = 'applied'
   line.stageTick = world.tick
   world.events.push({ tick: world.tick, type: 'line_applied', actor: firmId, importance: 3, payload: { line: line.id, name: line.name } })
   return ok(undefined)
 }
 
-// In M1 permits are granted directly; M3 replaces this with the AI mayors.
+// Approves a filed line without the mayors. For balancing scripts and tests
+// that need a line to go ahead; the game goes through permits.ts.
 export function grantLine(world: World, lineId: string): Result {
   const line = world.lines.find((l) => l.id === lineId)
   if (!line) return fail('unknown_line')
   if (line.stage !== 'applied') return fail('wrong_stage')
+  for (const p of world.permits) if (p.lineId === line.id && p.status === 'reviewing') p.status = 'approved'
   line.stage = 'approved'
   line.stageTick = world.tick
   world.events.push({ tick: world.tick, type: 'line_approved', actor: line.owner, importance: 3, payload: { line: line.id } })

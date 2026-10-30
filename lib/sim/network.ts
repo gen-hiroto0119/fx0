@@ -121,6 +121,25 @@ export function carMatrix(roads: RoadEdge[], chunkCount: number): CarMatrix {
 
 // --- Rail ---
 
+// The tiles the track crosses between consecutive stations, sampled once per
+// tile along each straight segment. `segment` is the index of the segment.
+export function trackTiles(line: Pick<Line, 'stations'>): { x: number; y: number; segment: number }[] {
+  const tiles: { x: number; y: number; segment: number }[] = []
+  for (let i = 1; i < line.stations.length; i++) {
+    const a = line.stations[i - 1]
+    const b = line.stations[i]
+    const steps = Math.max(1, Math.ceil(Math.hypot(a.x - b.x, a.y - b.y)))
+    for (let s = 0; s < steps; s++) {
+      tiles.push({
+        x: Math.round(a.x + ((b.x - a.x) * (s + 0.5)) / steps),
+        y: Math.round(a.y + ((b.y - a.y) * (s + 0.5)) / steps),
+        segment: i - 1,
+      })
+    }
+  }
+  return tiles
+}
+
 export function stationGapsKm(line: Line): number[] {
   const gaps: number[] = []
   for (let i = 1; i < line.stations.length; i++) {
